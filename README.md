@@ -14,6 +14,18 @@ npm run build    # typecheck + production build into dist/
 
 Progress is saved automatically to the browser's local storage. Use **↺ New** to start over.
 
+## The village map
+
+The Village tab shows the settlement as a 2.5D isometric island seen from above. Every building has its own plot:
+empty plots show a signpost, buildings under construction get scaffolding and a progress bar, and buildings grow
+as they level up (more cottages, more crop fields, more market stalls, taller halls). Villagers walk the roads,
+idle adventurers gather outside the tavern, smoke rises from chimneys, and the day/night cycle dims the land and
+lights the windows. Drag to pan, scroll or use the buttons to zoom, and click a building or plot to manage it.
+A list view is still available.
+
+The art is procedural SVG drawn from isometric primitives (`src/ui/map/sprites.tsx`), so it needs no image
+files. Each building is one function, so painted sprites can replace them one at a time.
+
 ## How it plays
 
 - **Time.** One in-game hour passes every half second at 1× speed (pause, 1×, 2× or 4×). Production, food and
@@ -43,6 +55,7 @@ src/game/   pure game logic, no React
   engine.ts   reducer (state, action) -> state, tick simulation, save/load
   rng.ts      seeded RNG; the seed lives in state, so runs are reproducible
 src/ui/     React panels (village, crafting, tavern & quests, market, chronicle)
+  map/        isometric village map: projection, plot layout, sprites, pan/zoom
 src/App.tsx game loop, speed controls, autosave
 ```
 
