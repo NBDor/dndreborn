@@ -1,10 +1,11 @@
 // Derived values and validation rules, shared by the engine and the UI.
 import {
-  BASE_HOUSING, BASE_STORAGE, BUILDINGS, BUILDING_ORDER, CLASSES, FOOD_PER_VILLAGER, HOUSING_PER_HOUSE, ITEMS,
-  QUESTS, STORAGE_PER_WAREHOUSE, TAX_PER_VILLAGER, TICKS_PER_DAY, TOWN_HALL_REPUTATION, UPKEEP_PER_LEVEL,
-  type QuestTemplate, type RecipeDef,
+  BASE_HOUSING, BASE_STORAGE, BUILDINGS, BUILDING_ORDER, CLASSES, DAYS_PER_SEASON, FOOD_PER_VILLAGER,
+  HOUSING_PER_HOUSE, ITEMS, QUESTS, SEASONS, STORAGE_PER_WAREHOUSE, TAX_PER_VILLAGER, TICKS_PER_DAY,
+  TOWN_HALL_REPUTATION, UPKEEP_PER_LEVEL, type QuestTemplate, type RecipeDef, type SeasonDef,
 } from './data';
-import type { Adventurer, BuildingId, GameState, Inventory, ItemId } from './types';
+import { GRID, isRoad, plotAt, plotTiles, type Plot } from './map';
+import type { Adventurer, BuildingId, GameState, Inventory, ItemId, Tile } from './types';
 
 export interface Cost {
   gold: number;
@@ -13,6 +14,15 @@ export interface Cost {
 
 export const day = (s: GameState) => Math.floor(s.tick / TICKS_PER_DAY) + 1;
 export const hourOfDay = (s: GameState) => s.tick % TICKS_PER_DAY;
+
+// ---------------------------------------------------------------- seasons
+
+export const seasonIndex = (s: GameState) => Math.floor((day(s) - 1) / DAYS_PER_SEASON) % SEASONS.length;
+export const season = (s: GameState): SeasonDef => SEASONS[seasonIndex(s)];
+/** 1-based day within the current season. */
+export const dayOfSeason = (s: GameState) => ((day(s) - 1) % DAYS_PER_SEASON) + 1;
+export const year = (s: GameState) => Math.floor((day(s) - 1) / (DAYS_PER_SEASON * SEASONS.length)) + 1;
+export const firewoodPerDay = (s: GameState) => s.population * season(s).firewood;
 
 export const qty = (s: GameState, item: ItemId) => s.inventory[item] ?? 0;
 export const storageCap = (s: GameState) => BASE_STORAGE + s.buildings.warehouse * STORAGE_PER_WAREHOUSE;
@@ -32,9 +42,12 @@ export function workforce(s: GameState): number {
 export function productionPerDay(s: GameState): Inventory {
   const out: Inventory = {};
   const eff = workforce(s);
+  const mult = season(s).production;
   for (const id of BUILDING_ORDER) {
     const p = BUILDINGS[id].produces;
-    if (p && s.buildings[id] > 0) out[p.item] = (out[p.item] ?? 0) + p.perLevelPerDay * s.buildings[id] * eff;
+    if (p && s.buildings[id] > 0) {
+      out[p.item] = (out[p.item] ?? 0) + p.perLevelPerDay * s.buildings[id] * eff * (mult[p.item] ?? 1);
+    }
   }
   return out;
 }
@@ -92,6 +105,61 @@ export function buildBlocker(s: GameState, id: BuildingId): string | null {
   if (s.construction) return 'Builders are busy';
   const missing = missingFor(s, buildCost(id, target));
   return missing.length ? `Missing ${missing.join(', ')}` : null;
+}
+
+// ---------------------------------------------------------------- placement
+
+/** A new building, and every new cottage, must be given a spot on the map. */
+export const needsPlacement = (s: GameState, id: BuildingId) => id === 'house' || s.buildings[id] === 0;
+
+export interface PlacedPlot {
+  id: BuildingId;
+  plot: Plot;
+  /** Cottage index for houses. */
+  index?: number;
+  underConstruction?: boolean;
+}
+
+/** Every plot in use: built buildings, cottages, and the site under construction. */
+export function placedPlots(s: GameState): PlacedPlot[] {
+  const out: PlacedPlot[] = [];
+  for (const id of BUILDING_ORDER) {
+    const at = s.placements[id];
+    if (id !== 'house' && at && s.buildings[id] > 0) out.push({ id, plot: plotAt(id, at) });
+  }
+  s.houses.forEach((at, index) => out.push({ id: 'house', plot: plotAt('house', at), index }));
+  const c = s.construction;
+  if (c?.at) {
+    out.push({ id: c.building, plot: plotAt(c.building, c.at), underConstruction: true, index: c.building === 'house' ? s.houses.length : undefined });
+  }
+  return out;
+}
+
+export function occupiedTiles(s: GameState): Set<string> {
+  const set = new Set<string>();
+  for (const { plot } of placedPlots(s)) for (const t of plotTiles(plot)) set.add(`${t.x},${t.y}`);
+  return set;
+}
+
+/** Reason a building cannot go at this spot, or null if it fits. */
+export function placementBlocker(s: GameState, id: BuildingId, at: Tile): string | null {
+  const plot = plotAt(id, at);
+  if (plot.x < 0 || plot.y < 0 || plot.x + plot.w > GRID || plot.y + plot.d > GRID) return 'Off the map';
+  const taken = occupiedTiles(s);
+  for (const t of plotTiles(plot)) {
+    if (isRoad(t.x, t.y)) return 'Blocks the road';
+    if (taken.has(`${t.x},${t.y}`)) return 'Space is taken';
+  }
+  return null;
+}
+
+/** First spot where the building fits, scanning outwards from the village centre. */
+export function findFreeSpot(s: GameState, id: BuildingId): Tile | null {
+  const c = GRID / 2;
+  const spots: Tile[] = [];
+  for (let x = 0; x < GRID; x++) for (let y = 0; y < GRID; y++) spots.push({ x, y });
+  spots.sort((a, b) => Math.hypot(a.x - c, a.y - c) - Math.hypot(b.x - c, b.y - c));
+  return spots.find((t) => !placementBlocker(s, id, t)) ?? null;
 }
 
 // ---------------------------------------------------------------- crafting

@@ -233,3 +233,29 @@ export const EPITHETS = [
   'the Bold', 'Ironhand', 'of the Vale', 'Swiftfoot', 'the Grey', 'Stormborn', 'Oakenshield', 'the Quiet', 'Ashwalker',
   'Brightblade', 'the Wanderer', 'Duskbane', 'Thornheart', 'the Lucky', 'Ravenwood',
 ];
+
+export type SeasonId = 'spring' | 'summer' | 'autumn' | 'winter';
+
+export interface SeasonDef {
+  id: SeasonId;
+  name: string;
+  icon: string;
+  /** Multipliers on daily production by item. Items not listed produce normally. */
+  production: Partial<Record<ItemId, number>>;
+  /** Wood burned per villager per day to keep warm. */
+  firewood: number;
+  description: string;
+}
+
+export const DAYS_PER_SEASON = 6;
+
+export const SEASONS: SeasonDef[] = [
+  { id: 'spring', name: 'Spring', icon: '🌱', production: { herbs: 1.25 }, firewood: 0,
+    description: 'Herbs flourish (+25%).' },
+  { id: 'summer', name: 'Summer', icon: '☀️', production: { food: 1.25 }, firewood: 0,
+    description: 'Long days: farms yield +25%.' },
+  { id: 'autumn', name: 'Autumn', icon: '🍂', production: { food: 1.1, herbs: 0.75 }, firewood: 0,
+    description: 'Harvest time: farms +10%, herbs -25%. Stock up for winter.' },
+  { id: 'winter', name: 'Winter', icon: '❄️', production: { food: 0.35, herbs: 0.25 }, firewood: 0.4,
+    description: 'Fields freeze: farms 35%, herbs 25%. Each villager burns 0.4 wood a day.' },
+];

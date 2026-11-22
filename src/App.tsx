@@ -1,6 +1,7 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { clearSave, createInitialState, loadGame, reduce, saveGame } from './game/engine';
-import { day, hourOfDay } from './game/rules';
+import { DAYS_PER_SEASON } from './game/data';
+import { day, dayOfSeason, hourOfDay, season, year } from './game/rules';
 import type { Action, GameState } from './game/types';
 import { BuildingsPanel } from './ui/BuildingsPanel';
 import { CraftingPanel } from './ui/CraftingPanel';
@@ -60,6 +61,9 @@ export default function App() {
         <div className="clock">
           Day <b>{day(state)}</b> · {String(hourOfDay(state)).padStart(2, '0')}:00
         </div>
+        <div className={`season season-${season(state).id}`} title={season(state).description}>
+          {season(state).icon} {season(state).name} {dayOfSeason(state)}/{DAYS_PER_SEASON} · Year {year(state)}
+        </div>
         <div className="speed">
           {SPEEDS.map((s) => (
             <button key={s} className={speed === s ? 'active' : 'ghost'} onClick={() => setSpeed(s)}>
@@ -82,7 +86,10 @@ export default function App() {
               </button>
             ))}
           </nav>
-          {tab === 'village' && <BuildingsPanel state={state} dispatch={dispatch} />}
+          {/* The village stays mounted so the map keeps its camera and animations across tabs. */}
+          <div hidden={tab !== 'village'}>
+            <BuildingsPanel state={state} dispatch={dispatch} />
+          </div>
           {tab === 'crafting' && <CraftingPanel state={state} dispatch={dispatch} />}
           {tab === 'tavern' && <TavernPanel state={state} dispatch={dispatch} />}
           {tab === 'market' && <MarketPanel state={state} dispatch={dispatch} />}

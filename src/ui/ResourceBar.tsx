@@ -1,6 +1,7 @@
 import { ITEMS, ITEM_ORDER } from '../game/data';
 import {
-  foodUsePerDay, housingCap, jobsNeeded, productionPerDay, qty, storageCap, taxesPerDay, upkeepPerDay, workforce,
+  firewoodPerDay, foodUsePerDay, housingCap, jobsNeeded, productionPerDay, qty, season, storageCap, taxesPerDay,
+  upkeepPerDay, workforce,
 } from '../game/rules';
 import type { GameState } from '../game/types';
 import { fmt, pct, signed } from './format';
@@ -26,16 +27,19 @@ export function ResourceBar({ state }: { state: GameState }) {
         {shown.map((id) => {
           let rate = prod[id] ?? 0;
           if (id === 'food') rate -= foodUsePerDay(state);
+          if (id === 'wood') rate -= firewoodPerDay(state);
           const n = qty(state, id);
           return (
             <Stat key={id} icon={ITEMS[id].icon} label={ITEMS[id].name} value={fmt(n)}
               rate={rate ? signed(rate) : undefined}
-              warn={(id === 'food' && (state.starving || rate < 0)) || n >= cap}
+              warn={(id === 'food' && (state.starving || rate < 0)) || (id === 'wood' && (state.freezing || rate < 0)) || n >= cap}
               title={`${ITEMS[id].description}\nStorage: ${fmt(n)}/${cap}`} />
           );
         })}
       </div>
       {state.starving && <div className="alert">⚠️ The village is starving! Build or upgrade farms, or buy food.</div>}
+      {state.freezing && <div className="alert">🥶 The woodpiles are empty and villagers are freezing! Get wood before winter ends.</div>}
+      {season(state).id === 'autumn' && <div className="hint">🍂 Winter is coming: stock food and wood. Farms slow to a crawl and every villager burns firewood.</div>}
     </section>
   );
 }

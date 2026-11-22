@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { QUESTS, RECIPES, TICKS_PER_DAY } from './data';
-import { createInitialState, reduce } from './engine';
-import { buildBlocker, buildCost, partyPower, qty, successChance } from './rules';
+import { DAYS_PER_SEASON, QUESTS, RECIPES, TICKS_PER_DAY } from './data';
+import { createInitialState, migrate, reduce } from './engine';
+import { DEFAULT_SPOTS } from './map';
+import {
+  buildBlocker, buildCost, firewoodPerDay, partyPower, placedPlots, placementBlocker, productionPerDay, qty, season,
+  successChance,
+} from './rules';
 import type { Action, Adventurer, GameState } from './types';
 
 const run = (s: GameState, ...actions: Action[]) => actions.reduce(reduce, s);
@@ -26,7 +30,7 @@ describe('engine', () => {
     const s = createInitialState(1);
     const snapshot = structuredClone(s);
     ticks(s, 30);
-    reduce(s, { type: 'build', building: 'house' });
+    reduce(s, { type: 'build', building: 'house', at: { x: 3, y: 3 } });
     expect(s).toEqual(snapshot);
   });
 
@@ -41,13 +45,43 @@ describe('engine', () => {
   it('builds a structure after its construction time', () => {
     let s = createInitialState(3);
     const cost = buildCost('quarry', 1);
-    s = run(s, { type: 'build', building: 'quarry' });
+    expect(reduce(s, { type: 'build', building: 'quarry' })).toBe(s); // a new building needs a spot
+    s = run(s, { type: 'build', building: 'quarry', at: { x: 12, y: 1 } });
     expect(s.construction?.building).toBe('quarry');
     expect(s.gold).toBe(120 - cost.gold);
     expect(buildBlocker(s, 'house')).toBe('Builders are busy');
     s = ticks(s, s.construction!.endsTick);
     expect(s.buildings.quarry).toBe(1);
+    expect(s.placements.quarry).toEqual({ x: 12, y: 1 });
     expect(s.construction).toBeNull();
+  });
+
+  it('upgrades an existing building in place without a spot', () => {
+    let s = createInitialState(3);
+    s = run(s, { type: 'build', building: 'farm' });
+    expect(s.construction).toMatchObject({ building: 'farm', targetLevel: 2 });
+    expect(s.construction?.at).toBeUndefined();
+  });
+
+  it('validates building placement', () => {
+    const s = createInitialState(3);
+    expect(placementBlocker(s, 'quarry', { x: 14, y: 1 })).toBe('Off the map');
+    expect(placementBlocker(s, 'smithy', { x: 7, y: 2 })).toBe('Blocks the road');
+    expect(placementBlocker(s, 'smithy', { x: 5, y: 5 })).toBe('Space is taken'); // overlaps town hall
+    expect(placementBlocker(s, 'smithy', { x: 10, y: 1 })).toBeNull();
+    expect(reduce(s, { type: 'build', building: 'quarry', at: { x: 14, y: 1 } })).toBe(s);
+  });
+
+  it('adds a cottage at a chosen spot for each house level', () => {
+    let s = createInitialState(4);
+    s = { ...s, gold: 999, inventory: { ...s.inventory, wood: 999 } };
+    s = run(s, { type: 'build', building: 'house', at: { x: 3, y: 14 } });
+    expect(placedPlots(s).some((p) => p.underConstruction && p.plot.x === 3 && p.plot.y === 14)).toBe(true);
+    expect(placementBlocker(s, 'house', { x: 3, y: 14 })).toBe('Space is taken');
+    s = ticks(s, s.construction!.endsTick);
+    expect(s.buildings.house).toBe(2);
+    expect(s.houses).toHaveLength(2);
+    expect(s.houses[1]).toEqual({ x: 3, y: 14 });
   });
 
   it('rejects invalid actions by returning the same state', () => {
@@ -106,5 +140,42 @@ describe('engine', () => {
     s = { ...s, inventory: { ...s.inventory, food: 0 }, buildings: { ...s.buildings, farm: 0 } };
     s = ticks(s, TICKS_PER_DAY);
     expect(s.population).toBe(4);
+  });
+
+  it('cycles seasons that change farm output', () => {
+    const s = createInitialState(11);
+    s.buildings.farm = 2;
+    s.population = 20; // fully staffed
+    const at = (d: number) => ({ ...s, tick: (d - 1) * TICKS_PER_DAY });
+    expect(season(at(1)).id).toBe('spring');
+    expect(season(at(1 + DAYS_PER_SEASON)).id).toBe('summer');
+    expect(season(at(1 + DAYS_PER_SEASON * 3)).id).toBe('winter');
+    expect(season(at(1 + DAYS_PER_SEASON * 4)).id).toBe('spring');
+    expect(productionPerDay(at(1 + DAYS_PER_SEASON)).food).toBeCloseTo(8 * 1.25);
+    expect(productionPerDay(at(1 + DAYS_PER_SEASON * 3)).food).toBeCloseTo(8 * 0.35);
+  });
+
+  it('burns firewood in winter and loses villagers when it runs out', () => {
+    let s = createInitialState(12);
+    s = { ...s, tick: DAYS_PER_SEASON * 3 * TICKS_PER_DAY, inventory: { ...s.inventory, food: 500, wood: 0 } };
+    s = { ...s, buildings: { ...s.buildings, lumber_camp: 0 } };
+    expect(firewoodPerDay(s)).toBeCloseTo(5 * 0.4);
+    s = ticks(s, TICKS_PER_DAY);
+    expect(s.population).toBe(4);
+  });
+
+  it('migrates version 1 saves to the fixed layout', () => {
+    const v1 = createInitialState(13) as unknown as Record<string, unknown>;
+    delete v1.placements;
+    delete v1.houses;
+    delete v1.freezing;
+    v1.version = 1;
+    (v1.buildings as Record<string, number>).house = 3;
+    v1.construction = { building: 'market', targetLevel: 1, endsTick: 50 };
+    const s = migrate(v1)!;
+    expect(s.version).toBe(2);
+    expect(s.placements.town_hall).toEqual(DEFAULT_SPOTS.town_hall);
+    expect(s.houses).toHaveLength(3);
+    expect(s.construction?.at).toEqual(DEFAULT_SPOTS.market);
   });
 });

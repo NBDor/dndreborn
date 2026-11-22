@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { BUILDINGS, BUILDING_ORDER, ITEMS, TOWN_HALL_REPUTATION } from '../game/data';
-import { buildBlocker, buildCost, buildHours, maxLevelFor, workforce } from '../game/rules';
+import { buildBlocker, buildCost, buildHours, maxLevelFor, needsPlacement, workforce } from '../game/rules';
 import type { Action, BuildingId, GameState } from '../game/types';
 import { costList } from './format';
 import { VillageMap } from './map/VillageMap';
@@ -10,6 +10,13 @@ type Props = { state: GameState; dispatch: (a: Action) => void };
 export function BuildingsPanel({ state, dispatch }: Props) {
   const [mode, setMode] = useState<'map' | 'list'>('map');
   const [selected, setSelected] = useState<BuildingId>('town_hall');
+  const [placing, setPlacing] = useState<BuildingId | null>(null);
+
+  const startPlacing = (id: BuildingId) => {
+    setSelected(id);
+    setPlacing(id);
+    setMode('map');
+  };
 
   return (
     <div className="panel">
@@ -17,12 +24,22 @@ export function BuildingsPanel({ state, dispatch }: Props) {
         <button className={mode === 'map' ? 'active' : 'ghost'} onClick={() => setMode('map')}>🗺️ Map</button>
         <button className={mode === 'list' ? 'active' : 'ghost'} onClick={() => setMode('list')}>📋 List</button>
       </div>
-      <ConstructionBanner state={state} dispatch={dispatch} />
       {mode === 'map' ? (
         <div className="map-layout">
-          <VillageMap state={state} selected={selected} onSelect={setSelected} />
+          <VillageMap
+            state={state}
+            selected={selected}
+            placing={placing}
+            onSelect={setSelected}
+            onPlace={(at) => {
+              dispatch({ type: 'build', building: placing!, at });
+              setPlacing(null);
+            }}
+            onCancelPlace={() => setPlacing(null)}
+          />
           <div className="map-side">
-            <BuildingCard id={selected} state={state} dispatch={dispatch} />
+            <ConstructionBanner state={state} dispatch={dispatch} />
+            <BuildingCard id={selected} state={state} dispatch={dispatch} onPlace={startPlacing} />
             <div className="card chips">
               {BUILDING_ORDER.map((id) => (
                 <button key={id} className={`chip${selected === id ? ' active' : ''}${state.buildings[id] ? '' : ' unbuilt'}`}
@@ -34,9 +51,12 @@ export function BuildingsPanel({ state, dispatch }: Props) {
           </div>
         </div>
       ) : (
+        <>
+        <ConstructionBanner state={state} dispatch={dispatch} />
         <div className="grid">
-          {BUILDING_ORDER.map((id) => <BuildingCard key={id} id={id} state={state} dispatch={dispatch} />)}
+          {BUILDING_ORDER.map((id) => <BuildingCard key={id} id={id} state={state} dispatch={dispatch} onPlace={startPlacing} />)}
         </div>
+        </>
       )}
     </div>
   );
@@ -56,7 +76,7 @@ function ConstructionBanner({ state, dispatch }: Props) {
   );
 }
 
-export function BuildingCard({ id, state, dispatch }: Props & { id: BuildingId }) {
+export function BuildingCard({ id, state, dispatch, onPlace }: Props & { id: BuildingId; onPlace: (id: BuildingId) => void }) {
   const def = BUILDINGS[id];
   const level = state.buildings[id];
   const target = level + 1;
@@ -95,9 +115,15 @@ export function BuildingCard({ id, state, dispatch }: Props & { id: BuildingId }
             {costList(cost.gold, cost.items).map((x) => <span key={x.key}>{x.label}</span>)}
             <span className="muted">⏱ {buildHours(id, target)}h</span>
           </div>
-          <button disabled={!!blocker} title={blocker ?? ''} onClick={() => dispatch({ type: 'build', building: id })}>
-            {level === 0 ? 'Build' : `Upgrade to ${target}`}
-          </button>
+          {needsPlacement(state, id) ? (
+            <button disabled={!!blocker} title={blocker ?? ''} onClick={() => onPlace(id)}>
+              📍 {id === 'house' ? 'Place a new cottage' : 'Choose a spot'}
+            </button>
+          ) : (
+            <button disabled={!!blocker} title={blocker ?? ''} onClick={() => dispatch({ type: 'build', building: id })}>
+              Upgrade to {target}
+            </button>
+          )}
           {blocker && <span className="blocker">{blocker}</span>}
         </footer>
       )}

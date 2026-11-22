@@ -176,17 +176,13 @@ button.small { padding: 2px 8px; font-size: 12px; }
   overflow: hidden;
   background: radial-gradient(ellipse at 50% 40%, #2d4a5c 0%, #1a2a36 55%, #121a22 100%);
 }
-.village-map { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; user-select: none; }
-.village-map:active { cursor: grabbing; }
-.village-map .bld { cursor: pointer; }
-.village-map .bld:hover { filter: brightness(1.15) drop-shadow(0 0 3px rgba(255, 230, 160, 0.6)); }
-.village-map .bld.selected { filter: drop-shadow(0 0 4px rgba(217, 164, 65, 0.9)); }
-.village-map .plot:hover polygon { fill: rgba(217, 164, 65, 0.25); }
-.village-map .selection { fill: rgba(217, 164, 65, 0.18); stroke: #ffd36b; stroke-width: 1.6; pointer-events: none; }
-.map-label {
-  fill: #fff6e0; font: 600 12px Georgia, serif; paint-order: stroke; stroke: rgba(20, 12, 4, 0.85); stroke-width: 3px;
+.map-canvas { position: absolute; inset: 0; cursor: grab; touch-action: none; user-select: none; }
+
+.placing {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px;
+  background: rgba(27, 23, 18, 0.9); border: 1px solid #8fc46a; border-radius: 8px; padding: 6px 8px 6px 12px;
+  white-space: nowrap; max-width: calc(100% - 80px);
 }
-.map-label.small { font-size: 9px; }
 
 .map-controls { position: absolute; top: 10px; right: 10px; display: flex; flex-direction: column; gap: 4px; }
 .map-controls button { background: rgba(38, 32, 25, 0.85); width: 34px; padding: 4px 0; }
@@ -200,20 +196,9 @@ button.small { padding: 2px 8px; font-size: 12px; }
 .chip.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
 .chip.unbuilt { opacity: 0.6; }
 
-.smoke { transform-box: fill-box; transform-origin: center; animation: smoke 3.3s linear infinite; opacity: 0; }
-@keyframes smoke {
-  0% { transform: translate(0, 0) scale(0.5); opacity: 0.75; }
-  100% { transform: translate(10px, -38px) scale(1.8); opacity: 0; }
-}
-.flag { transform-box: fill-box; transform-origin: left center; animation: flag 1.6s ease-in-out infinite alternate; }
-@keyframes flag { from { transform: skewY(-6deg) scaleX(0.92); } to { transform: skewY(6deg) scaleX(1); } }
-.lit polygon, .lantern { filter: drop-shadow(0 0 3px rgba(255, 200, 90, 0.9)); }
-.firefly { animation: firefly 3s ease-in-out infinite; }
-@keyframes firefly { 0%, 100% { opacity: 0.1; } 50% { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) {
-  .smoke, .flag, .firefly { animation: none; }
-}
-/* Night lights pass: a second copy of the scene drawn above the darkness, showing only lights. */
-.lights-only * { visibility: hidden; }
-.lights-only .lit, .lights-only .lit *, .lights-only .lantern { visibility: visible; }
-.lights-only .smoke, .lights-only .flag { animation: none; }
+.season { padding: 2px 10px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); font-size: 13px; }
+.season-winter { border-color: #9fc3dc; }
+.season-autumn { border-color: #d9822b; }
+.season-spring { border-color: #8fc46a; }
+.season-summer { border-color: #e6c34a; }
+.hint { margin-top: 8px; color: var(--muted); font-size: 13px; }

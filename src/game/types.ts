@@ -64,10 +64,17 @@ export interface ActiveQuest {
   successChance: number;
 }
 
+export interface Tile {
+  x: number;
+  y: number;
+}
+
 export interface Construction {
   building: BuildingId;
   targetLevel: number;
   endsTick: number;
+  /** Where a new building (or a new cottage) is going up. Absent for upgrades in place. */
+  at?: Tile;
 }
 
 export type LogKind = 'info' | 'good' | 'bad' | 'quest';
@@ -88,6 +95,10 @@ export interface GameState {
   population: number;
   inventory: Inventory;
   buildings: Record<BuildingId, number>;
+  /** Top-left tile of each built building (houses excluded). */
+  placements: Partial<Record<BuildingId, Tile>>;
+  /** One tile per cottage; its length equals the house level. */
+  houses: Tile[];
   construction: Construction | null;
   adventurers: Adventurer[];
   quests: ActiveQuest[];
@@ -95,11 +106,13 @@ export interface GameState {
   nextId: number;
   /** Food shortfall on the last day, used to show warnings. */
   starving: boolean;
+  /** Firewood ran out during winter on the current day. */
+  freezing: boolean;
 }
 
 export type Action =
   | { type: 'tick' }
-  | { type: 'build'; building: BuildingId }
+  | { type: 'build'; building: BuildingId; at?: Tile }
   | { type: 'cancelBuild' }
   | { type: 'craft'; recipeId: string; times?: number }
   | { type: 'buy'; item: ItemId; qty: number }

@@ -1,20 +1,21 @@
 // The game reducer. Pure: (state, action) -> new state. Randomness comes from state.seed.
-import { BUILDINGS, CLASSES, EPITHETS, FIRST_NAMES, ITEMS, RECIPES, TICKS_PER_DAY } from './data';
+import { BUILDINGS, CLASSES, DAYS_PER_SEASON, EPITHETS, FIRST_NAMES, ITEMS, RECIPES, TICKS_PER_DAY } from './data';
+import { DEFAULT_HOUSE_SPOTS, DEFAULT_SPOTS } from './map';
 import { Rng } from './rng';
 import {
-  buildBlocker, buildCost, buildHours, buyPrice, day, foodUsePerDay, housingCap, productionPerDay, qty,
-  questBlocker, questDays, questTemplate, recipeBlocker, sellPrice, storageCap, successChance, taxesPerDay,
-  upkeepPerDay, xpToNext,
+  buildBlocker, buildCost, buildHours, buyPrice, day, findFreeSpot, firewoodPerDay, foodUsePerDay, housingCap,
+  needsPlacement, placementBlocker, productionPerDay, qty, questBlocker, questDays, questTemplate, recipeBlocker,
+  season, sellPrice, storageCap, successChance, taxesPerDay, upkeepPerDay, xpToNext,
 } from './rules';
 import type { Action, Adventurer, AdventurerClass, GameState, Inventory, ItemId, LogKind } from './types';
 
-export const SAVE_VERSION = 1;
+export const SAVE_VERSION = 2;
 const MAX_LOG = 120;
 
 export function createInitialState(seed = Date.now() % 2147483647): GameState {
   const s: GameState = {
     version: SAVE_VERSION,
-    tick: 0,
+    tick: 8, // start in the morning
     seed,
     gold: 120,
     reputation: 0,
@@ -24,12 +25,18 @@ export function createInitialState(seed = Date.now() % 2147483647): GameState {
       town_hall: 1, house: 1, farm: 1, lumber_camp: 1, quarry: 0, mine: 0, herb_garden: 0, warehouse: 0,
       workshop: 0, smithy: 0, apothecary: 0, tavern: 1, market: 0,
     },
+    placements: {
+      town_hall: DEFAULT_SPOTS.town_hall, farm: DEFAULT_SPOTS.farm, lumber_camp: DEFAULT_SPOTS.lumber_camp,
+      tavern: DEFAULT_SPOTS.tavern,
+    },
+    houses: [DEFAULT_HOUSE_SPOTS[0]],
     construction: null,
     adventurers: [],
     quests: [],
     log: [],
     nextId: 1,
     starving: false,
+    freezing: false,
   };
   const rng = new Rng(seed);
   const first = spawnAdventurer(s, rng);
@@ -95,11 +102,14 @@ function apply(s: GameState, action: Action, rng: Rng): boolean {
 
     case 'build': {
       if (buildBlocker(s, action.building)) return false;
+      const place = needsPlacement(s, action.building);
+      if (place && (!action.at || placementBlocker(s, action.building, action.at))) return false;
       const target = s.buildings[action.building] + 1;
       const cost = buildCost(action.building, target);
       s.gold -= cost.gold;
       removeItems(s, cost.items);
       s.construction = { building: action.building, targetLevel: target, endsTick: s.tick + buildHours(action.building, target) };
+      if (place && action.at) s.construction.at = { x: action.at.x, y: action.at.y };
       const def = BUILDINGS[action.building];
       log(s, 'info', target === 1 ? `Construction of the ${def.name} has begun.` : `Upgrading ${def.name} to level ${target}.`);
       return true;
@@ -203,12 +213,25 @@ function tick(s: GameState, rng: Rng) {
   } else {
     s.inventory.food = qty(s, 'food') - eaten;
   }
+  const burned = firewoodPerDay(s) / TICKS_PER_DAY;
+  if (burned > 0) {
+    if (qty(s, 'wood') < burned) {
+      s.inventory.wood = 0;
+      s.freezing = true;
+    } else {
+      s.inventory.wood = qty(s, 'wood') - burned;
+    }
+  }
   s.gold = Math.max(0, s.gold + (taxesPerDay(s) - upkeepPerDay(s)) / TICKS_PER_DAY);
 
   // Construction.
   const c = s.construction;
   if (c && s.tick >= c.endsTick) {
     s.buildings[c.building] = c.targetLevel;
+    if (c.at) {
+      if (c.building === 'house') s.houses.push(c.at);
+      else s.placements[c.building] = c.at;
+    }
     s.construction = null;
     const def = BUILDINGS[c.building];
     log(s, 'good', c.targetLevel === 1 ? `The ${def.name} is complete!` : `${def.name} upgraded to level ${c.targetLevel}.`);
@@ -302,17 +325,26 @@ function resolveQuest(s: GameState, questId: string, rng: Rng) {
 function newDay(s: GameState, rng: Rng) {
   const today = day(s);
 
+  // Seasons.
+  if ((today - 1) % DAYS_PER_SEASON === 0) {
+    const se = season(s);
+    log(s, se.id === 'winter' ? 'bad' : 'info', `${se.icon} ${se.name} has come. ${se.description}`);
+  }
+
   // Population.
-  if (s.starving) {
+  if (s.starving || s.freezing) {
     if (s.population > 1) {
       s.population -= 1;
-      log(s, 'bad', 'Food ran out. A family has left the village in search of a better life.');
+      log(s, 'bad', s.starving
+        ? 'Food ran out. A family has left the village in search of a better life.'
+        : 'The woodpiles ran dry and the cold set in. A family has left for warmer lands.');
     }
   } else if (s.population < housingCap(s) && qty(s, 'food') > s.population) {
     s.population += 1;
     log(s, 'good', 'A new family has settled in the village.');
   }
   s.starving = false;
+  s.freezing = false;
 
   // Adventurers: recovery, departures, arrivals.
   for (const a of s.adventurers) {
@@ -371,8 +403,7 @@ export function loadGame(): GameState | null {
   try {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return null;
-    const s = JSON.parse(raw) as GameState;
-    return s.version === SAVE_VERSION ? s : null;
+    return migrate(JSON.parse(raw));
   } catch {
     return null;
   }
@@ -384,4 +415,29 @@ export function clearSave() {
   } catch {
     /* ignore */
   }
+}
+
+/** Upgrade an older save to the current format. Returns null if it cannot be read. */
+export function migrate(raw: unknown): GameState | null {
+  const s = raw as GameState & { version: number };
+  if (!s || typeof s !== 'object' || typeof s.version !== 'number') return null;
+  if (s.version === 1) {
+    // v1 had a fixed layout: give every existing building its old spot.
+    s.placements = {};
+    for (const [id, at] of Object.entries(DEFAULT_SPOTS) as [keyof typeof DEFAULT_SPOTS, (typeof DEFAULT_SPOTS)['farm']][]) {
+      if (s.buildings[id] > 0) s.placements[id] = at;
+    }
+    s.houses = DEFAULT_HOUSE_SPOTS.slice(0, s.buildings.house);
+    s.freezing = false;
+    const c = s.construction;
+    if (c && needsPlacement(s, c.building)) {
+      c.at = c.building === 'house' ? DEFAULT_HOUSE_SPOTS[s.buildings.house] : DEFAULT_SPOTS[c.building];
+      if (!c.at || placementBlocker({ ...s, construction: null }, c.building, c.at)) {
+        c.at = findFreeSpot({ ...s, construction: null }, c.building) ?? undefined;
+      }
+      if (!c.at) s.construction = null;
+    }
+    s.version = 2;
+  }
+  return s.version === SAVE_VERSION ? s : null;
 }
