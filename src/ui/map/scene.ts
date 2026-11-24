@@ -1,23 +1,25 @@
 // The village scene, rendered with PixiJS. Owned by <VillageMap>, which feeds it game state.
-// React never touches the canvas: `update()` diffs the state against what is on screen and
-// rebuilds only what changed; a ticker animates people, smoke, weather and flags in between.
+// React never touches the canvas: `update()` diffs the state against what is on screen and rebuilds
+// only what changed; a ticker animates people, goats, smoke and weather in between.
 import { Application, Container, Graphics, Text } from 'pixi.js';
-import { BUILDINGS, type SeasonId } from '../../game/data';
-import { FOOTPRINTS, GRID, ROAD_X, ROAD_Y, isRoad, plotAt, type Plot } from '../../game/map';
-import { buildHours, hourOfDay, occupiedTiles, placedPlots, placementBlocker, season } from '../../game/rules';
-import type { Adventurer, BuildingId, GameState, Tile } from '../../game/types';
-import { drawBuilding, drawScaffold, type BuildingMeta } from './buildings';
-import { LIGHT, Painter, STROKE, drawBush, drawPerson, drawPine, drawRock, drawTree } from './draw';
-import { TH, TW, hash, iso, shade, type Pt } from './iso';
+import { NEIGHBORS, STRUCTURES } from '../../game/data';
+import { GRID, hasTree, isBank, isRiver, noise, plotAt, riverX, tileKey, type Plot } from '../../game/map';
+import {
+  age, fieldStage, isUnwell, occupied, placementBlocker, plotOf, season, treesOn,
+} from '../../game/rules';
+import type { GameState, JobId, Person, SeasonId, StructureType, Tile } from '../../game/types';
+import { drawGoat, drawScaffold, drawStructure, type BuildingMeta } from './buildings';
+import { Painter, drawBush, drawPerson, drawPine, drawRock, drawTree } from './draw';
+import { TH, TW, iso, shade, type Pt } from './iso';
 
 export interface SceneProps {
   state: GameState;
-  selected: BuildingId | null;
-  placing: BuildingId | null;
+  selected: string | null;
+  placing: StructureType | null;
 }
 
 export interface SceneCallbacks {
-  onSelect: (id: BuildingId) => void;
+  onSelect: (id: string) => void;
   onPlace: (at: Tile) => void;
   onCancelPlace: () => void;
 }
@@ -26,30 +28,30 @@ interface Entity {
   sig: string;
   root: Container;
   body: Graphics;
-  lights: Graphics;
   meta?: BuildingMeta;
-  flag?: Graphics;
-  /** Building this entity selects when clicked. */
-  target?: BuildingId;
+  /** Structure id this entity selects when clicked. */
+  target?: string;
   plot?: Plot;
-  /** For adventurers at the tavern: drawn with a bandage. */
-  hurt?: boolean;
 }
 
-interface Walker {
+interface Mover {
   root: Container;
   body: Graphics;
-  path: Pt[]; // tile coordinates
-  leg: number;
-  t: number; // progress along current leg, in tiles
-  speed: number; // tiles per second
-  delay: number;
-  onDone?: () => void;
+  x: number;
+  y: number;
+  tx: number;
+  ty: number;
+  speed: number;
+  wait: number;
 }
 
-interface Villager extends Walker {
-  wait: number;
-  lane: number;
+interface Traveller {
+  root: Container;
+  body: Graphics;
+  path: Pt[];
+  leg: number;
+  t: number;
+  delay: number;
 }
 
 interface Particle {
@@ -62,52 +64,22 @@ interface Particle {
   phase: number;
 }
 
-export const CLASS_COLORS: Record<Adventurer['cls'], string> = {
-  warrior: '#b03a2e', rogue: '#34343a', mage: '#4b4bb8', ranger: '#2e7d32', cleric: '#e6d9a0',
-};
-const VILLAGER_COLORS = ['#8a6d4b', '#6b7f99', '#9c5b5b', '#6f8f5a', '#b39b6b', '#7a6a8c'];
+const CLOTHES = ['#8a6d4b', '#6b5a3e', '#9c7b55', '#7a6a50', '#a08560', '#5f5240'];
+const GOAT_COLORS = ['#e8e0d0', '#d8c8a8', '#a08060', '#f2ede4', '#6b5440'];
 
-const GROUND: Record<SeasonId, { grass: string; road: string; edge: string }> = {
-  spring: { grass: '#78ab4c', road: '#b89c6b', edge: '#558a3a' },
-  summer: { grass: '#7a9e44', road: '#c0a46f', edge: '#5f8c41' },
-  autumn: { grass: '#9a9447', road: '#b39468', edge: '#7d7a3a' },
-  winter: { grass: '#e6ecf0', road: '#cfc6b8', edge: '#d3dce2' },
+const GROUND: Record<SeasonId, { grass: string; edge: string; water: string; bank: string }> = {
+  spring: { grass: '#78ab4c', edge: '#558a3a', water: '#3f7fa8', bank: '#9a9a5a' },
+  summer: { grass: '#7a9e44', edge: '#5f8c41', water: '#3a78a0', bank: '#a8a060' },
+  autumn: { grass: '#9a9447', edge: '#7d7a3a', water: '#3a6f90', bank: '#9a8a52' },
+  winter: { grass: '#e6ecf0', edge: '#d3dce2', water: '#a9c7d8', bank: '#d8dde0' },
 };
 
-const ROAD_C = { x: ROAD_X + 0.5, y: ROAD_Y + 0.5 };
-
-/** 0 by day, up to 0.5 at night. */
-export function darkness(hour: number): number {
-  if (hour >= 21 || hour < 5) return 0.5;
-  if (hour >= 18) return ((hour - 18) / 3) * 0.5;
-  if (hour < 8) return ((8 - hour) / 3) * 0.5;
-  return 0;
+function labelStyle(size: number) {
+  return {
+    fontFamily: 'Georgia, serif', fontSize: size, fontWeight: '600' as const, fill: '#fff6e0',
+    stroke: { color: '#140c04', width: 3 }, align: 'center' as const,
+  };
 }
-
-function mix(a: number, b: number, t: number): number {
-  const ch = (n: number, s: number) => (n >> s) & 255;
-  const c = (s: number) => Math.round(ch(a, s) + (ch(b, s) - ch(a, s)) * t);
-  return (c(16) << 16) | (c(8) << 8) | c(0);
-}
-
-/** Deterministic trees, rocks and bushes for every non-road tile; hidden where something is built. */
-const DECOR: { kind: 'tree' | 'pine' | 'rock' | 'bush'; x: number; y: number; tile: string }[] = (() => {
-  const out: typeof DECOR = [];
-  for (let x = 0; x < GRID; x++) {
-    for (let y = 0; y < GRID; y++) {
-      if (isRoad(x, y)) continue;
-      const r = hash(x, y, 1);
-      const forest = x <= 4 && y <= 4 ? 0.7 : x === 0 || y === 0 || x === GRID - 1 ? 0.4 : 0.1;
-      const rocky = x >= 11 && y <= 4;
-      const px = x + 0.25 + hash(x, y, 2) * 0.5, py = y + 0.25 + hash(x, y, 3) * 0.5;
-      const tile = `${x},${y}`;
-      if (r < forest) out.push({ kind: hash(x, y, 4) < 0.5 ? 'pine' : 'tree', x: px, y: py, tile });
-      else if (rocky && r < forest + 0.3) out.push({ kind: 'rock', x: px, y: py, tile });
-      else if (r > 0.93) out.push({ kind: 'bush', x: px, y: py, tile });
-    }
-  }
-  return out;
-})();
 
 export class VillageScene {
   private app = new Application();
@@ -121,22 +93,18 @@ export class VillageScene {
   private ghost = new Container();
   private ghostText = new Text({ text: '', style: labelStyle(11) });
   private selLabel = new Text({ text: '', style: labelStyle(13) });
-  private buildLabel = new Text({ text: '', style: labelStyle(10) });
-  private buildBar = new Graphics();
+  private bars = new Graphics();
 
   private entities = new Map<string, Entity>();
-  private villagers: Villager[] = [];
-  private walkers: Walker[] = [];
-  private loiterers = new Map<string, Entity>();
-  private walkingIn = new Set<string>();
-  private knownAdventurers: Map<string, Adventurer['status']> | null = null;
+  private people = new Map<string, Mover>();
+  private goats: Mover[] = [];
+  private travellers: Traveller[] = [];
+  private knownTrips = new Set<string>();
+  private tripsReady = false;
   private particles: Particle[] = [];
-  private fireflies: Graphics[] = [];
 
   private props: SceneProps | null = null;
   private season: SeasonId | null = null;
-  private tint = 0xffffff;
-  private lit = false;
   private ghostTile: Tile | null = null;
   private ghostSig = '';
   private hovered: Entity | null = null;
@@ -148,10 +116,6 @@ export class VillageScene {
   private cleanup: (() => void)[] = [];
 
   constructor(private cb: SceneCallbacks) {}
-
-  setCallbacks(cb: SceneCallbacks) {
-    this.cb = cb;
-  }
 
   async init(el: HTMLElement) {
     this.el = el;
@@ -167,9 +131,9 @@ export class VillageScene {
     this.app.canvas.style.display = 'block';
     this.app.stage.eventMode = 'none';
     this.world.addChild(this.groundG, this.overlayG, this.objects, this.fx, this.weather, this.ui);
-    this.ui.addChild(this.buildBar, this.buildLabel, this.selLabel, this.ghost, this.ghostText);
+    this.ui.addChild(this.bars, this.selLabel, this.ghost, this.ghostText);
     this.ghost.alpha = 0.7;
-    for (const t of [this.ghostText, this.selLabel, this.buildLabel]) {
+    for (const t of [this.ghostText, this.selLabel]) {
       t.anchor.set(0.5, 1);
       t.resolution = 3;
     }
@@ -177,7 +141,6 @@ export class VillageScene {
     this.fit();
     this.bindInput();
     this.app.ticker.add((t) => this.animate(t.deltaMS / 1000));
-    // Follow the container's size (it changes with layout, not only with the window).
     let last = { w: el.clientWidth, h: el.clientHeight };
     const ro = new ResizeObserver(() => {
       const w = el.clientWidth, h = el.clientHeight;
@@ -199,11 +162,11 @@ export class VillageScene {
     if (this.ready) this.app.destroy(true, { children: true });
   }
 
-  // ---------------------------------------------------------------- camera
+  // ---------------------------------------------------------------- camera and input
 
   fit() {
     const { width, height } = this.app.screen;
-    const s = Math.min(width / 1080, height / 680);
+    const s = Math.min(width / 1000, height / 640);
     this.world.scale.set(s);
     const [cx, cy] = iso(GRID / 2, GRID / 2);
     this.world.position.set(width / 2 - cx * s, height / 2 - (cy - 30) * s);
@@ -213,7 +176,7 @@ export class VillageScene {
     const { width, height } = this.app.screen;
     const [mx, my] = at ?? [width / 2, height / 2];
     const s0 = this.world.scale.x;
-    const s1 = Math.min(3.5, Math.max(0.4, s0 * f));
+    const s1 = Math.min(3.5, Math.max(0.35, s0 * f));
     const wx = (mx - this.world.x) / s0, wy = (my - this.world.y) / s0;
     this.world.scale.set(s1);
     this.world.position.set(mx - wx * s1, my - wy * s1);
@@ -263,9 +226,7 @@ export class VillageScene {
       const placing = this.props?.placing;
       if (placing) {
         this.pointerAt(mx, my);
-        if (this.ghostTile && this.props && !placementBlocker(this.props.state, placing, this.ghostTile)) {
-          this.cb.onPlace(this.ghostTile);
-        }
+        if (this.ghostTile && this.props && !placementBlocker(this.props.state, placing, this.ghostTile)) this.cb.onPlace(this.ghostTile);
         return;
       }
       const hit = this.hitTest(mx, my);
@@ -301,7 +262,7 @@ export class VillageScene {
     const placing = this.props?.placing;
     if (placing) {
       const [tx, ty] = this.toTile(mx, my);
-      const { w, d } = FOOTPRINTS[placing];
+      const { w, d } = STRUCTURES[placing];
       const tile = { x: Math.floor(tx - w / 2 + 0.5), y: Math.floor(ty - d / 2 + 0.5) };
       if (tile.x !== this.ghostTile?.x || tile.y !== this.ghostTile?.y) {
         this.ghostTile = tile;
@@ -318,17 +279,15 @@ export class VillageScene {
     this.el!.style.cursor = hit ? 'pointer' : 'grab';
   }
 
-  /** Topmost clickable entity under the pointer. */
   private hitTest(mx: number, my: number): Entity | null {
-    const candidates = [...this.entities.values(), ...this.loiterers.values()]
-      .filter((e) => e.target && e.root.visible)
-      .sort((a, b) => b.root.zIndex - a.root.zIndex);
     const [wx, wy] = this.toWorld(mx, my);
+    const candidates = [...this.entities.values()].filter((e) => e.target).sort((a, b) => b.root.zIndex - a.root.zIndex);
     for (const e of candidates) {
-      const p = { x: wx - e.root.x, y: wy - e.root.y };
-      if (e.body.containsPoint(p)) return e;
+      if (e.body.containsPoint({ x: wx - e.root.x, y: wy - e.root.y })) return e;
     }
-    return null;
+    // Flat things like fields: fall back to the footprint under the pointer.
+    const [tx, ty] = this.toTile(mx, my);
+    return candidates.find((e) => e.plot && tx >= e.plot.x && tx < e.plot.x + e.plot.w && ty >= e.plot.y && ty < e.plot.y + e.plot.d) ?? null;
   }
 
   // ---------------------------------------------------------------- state sync
@@ -344,11 +303,11 @@ export class VillageScene {
       this.drawGround();
       this.resetWeather();
     }
-    this.syncBuildings(state);
-    this.syncDecorations(state);
-    this.syncAdventurers(state);
-    this.syncVillagers(Math.min(state.population, 16));
-    this.syncLighting(state);
+    this.syncStructures(state);
+    this.syncTrees(state);
+    this.syncPeople(state);
+    this.syncGoats(state);
+    this.syncTrips(state);
     if (placingChanged) {
       this.ghostTile = null;
       this.ghostSig = '';
@@ -357,12 +316,11 @@ export class VillageScene {
     this.drawOverlay();
   }
 
-  private makeEntity(key: string, sig: string, at: Pt, z: number, draw: (P: Painter) => BuildingMeta | void, target?: BuildingId, plot?: Plot): Entity {
+  private makeEntity(key: string, sig: string, at: Pt, z: number, draw: (P: Painter) => BuildingMeta | void, target?: string, plot?: Plot): Entity {
     const old = this.entities.get(key);
     if (old && old.sig === sig) {
       old.root.position.set(at[0], at[1]);
       old.root.zIndex = z;
-      old.plot = plot;
       return old;
     }
     if (old) old.root.destroy({ children: true });
@@ -371,284 +329,264 @@ export class VillageScene {
     const lights = new Graphics();
     root.addChild(body, lights);
     const meta = draw(new Painter(body, lights, this.season ?? 'spring')) ?? undefined;
-    const e: Entity = { sig, root, body, lights, meta, target, plot };
-    if (meta?.flag) {
-      const f = new Graphics();
-      const [fx, fy] = meta.flag;
-      body.moveTo(fx, fy).lineTo(fx, fy - 16).stroke({ width: 1.2, color: '#3b2b1b' });
-      f.poly([0, 0, 12, 3, 0, 7]).fill('#d9a441');
-      f.position.set(fx, fy - 16);
-      root.addChild(f);
-      e.flag = f;
-    }
     root.position.set(at[0], at[1]);
     root.zIndex = z;
-    body.tint = this.tint;
-    if (e.flag) e.flag.tint = this.tint;
-    lights.visible = this.lit;
     this.objects.addChild(root);
+    const e: Entity = { sig, root, body, meta, target, plot };
     this.entities.set(key, e);
     return e;
   }
 
-  private syncBuildings(state: GameState) {
+  private syncStructures(state: GameState) {
     const keep = new Set<string>();
-    const c = state.construction;
-    for (const pp of placedPlots(state)) {
-      const { id, plot } = pp;
-      const level = state.buildings[id];
-      const key = pp.underConstruction ? 'site' : id === 'house' ? `house${pp.index}` : id;
-      const upgrading = !!c && !c.at && c.building === id && id !== 'house';
-      const sig = `${this.season}|${id}|${level}|${pp.underConstruction ? 'site' : ''}|${upgrading ? 'up' : ''}|${plot.x},${plot.y}`;
-      keep.add(key);
-      this.makeEntity(key, sig, iso(plot.x, plot.y), plot.x + plot.w + plot.y + plot.d, (P) => {
-        if (pp.underConstruction) {
-          drawScaffold(P, plot.w, plot.d, id === 'house' ? 20 : 26);
+    const potting = state.people.some((p) => p.job === 'potter' && !p.away);
+    for (const x of state.structures) {
+      const plot = plotOf(x);
+      const def = STRUCTURES[x.type];
+      let opts = {};
+      let extra = '';
+      if (x.type === 'field' && x.field) {
+        const stage = fieldStage(x.field, state.day);
+        const growth = x.field.sownOn === null ? 0 : Math.min(1, (state.day - x.field.sownOn) / 120);
+        const stubble = x.field.harvestedOn !== undefined && state.day - x.field.harvestedOn < 150;
+        opts = { stage, growth, stubble };
+        extra = `${stage}|${Math.round(growth * 8)}|${stubble}`;
+      }
+      if (x.type === 'kiln') {
+        opts = { firing: potting };
+        extra = String(potting);
+      }
+      const progress = x.built ? 1 : x.work / x.workNeeded;
+      const sig = `${this.season}|${x.type}|${x.built}|${x.built ? '' : Math.round(progress * 6)}|${extra}`;
+      keep.add(x.id);
+      this.makeEntity(x.id, sig, iso(plot.x, plot.y), plot.x + plot.w + plot.y + plot.d, (P) => {
+        if (!x.built) {
+          if (x.type === 'field') {
+            P.ground(0.08, 0.08, plot.w - 0.16, plot.d - 0.16, '#8f7a55', 0.3 + progress * 0.6, true);
+            return { smoke: [], top: 24 };
+          }
+          drawScaffold(P, plot.w, plot.d, def.housing ? 26 : 16, progress);
           return { smoke: [], top: 40 };
         }
-        const meta = drawBuilding(P, id, plot.w, plot.d, level, pp.index ?? 0);
-        if (upgrading) drawScaffold(P, plot.w, plot.d, Math.min(60, meta.top - 6));
-        return meta;
-      }, id, plot);
+        return drawStructure(P, x.type, plot.w, plot.d, opts);
+      }, x.id, plot);
     }
     for (const [key, e] of this.entities) {
-      if (!key.startsWith('d:') && !keep.has(key)) {
+      if (!key.startsWith('t:') && !keep.has(key)) {
         e.root.destroy({ children: true });
         this.entities.delete(key);
       }
     }
   }
 
-  private syncDecorations(state: GameState) {
-    const taken = occupiedTiles(state);
-    for (const d of DECOR) {
-      const key = `d:${d.tile}`;
-      if (taken.has(d.tile)) {
-        const e = this.entities.get(key);
-        if (e) {
-          e.root.destroy({ children: true });
-          this.entities.delete(key);
+  private syncTrees(state: GameState) {
+    const taken = occupied(state);
+    for (let x = 0; x < GRID; x++) {
+      for (let y = 0; y < GRID; y++) {
+        const key = `t:${x},${y}`;
+        const tile = tileKey({ x, y });
+        const decor = this.decorAt(x, y);
+        const show = decor && !taken.has(tile) && (decor !== 'tree' && decor !== 'pine' || !state.cleared.includes(tile));
+        if (!show) {
+          const e = this.entities.get(key);
+          if (e) {
+            e.root.destroy({ children: true });
+            this.entities.delete(key);
+          }
+          continue;
         }
-        continue;
+        const px = x + 0.25 + noise(x, y, 2) * 0.5, py = y + 0.25 + noise(x, y, 3) * 0.5;
+        this.makeEntity(key, `${this.season}`, iso(px, py), px + py + 0.2, (P) => {
+          const s = 0.9 + noise(x, y, 5) * 0.35;
+          if (decor === 'tree') drawTree(P.g, P.season, s);
+          else if (decor === 'pine') drawPine(P.g, P.season, s);
+          else if (decor === 'rock') drawRock(P.g, P.season, s);
+          else drawBush(P.g, P.season);
+        });
       }
-      this.makeEntity(key, `${this.season}`, iso(d.x, d.y), d.x + d.y + 0.2, (P) => {
-        const s = 0.9 + hash(d.x * 10, d.y * 10, 5) * 0.3;
-        if (d.kind === 'tree') drawTree(P.g, P.season, s);
-        else if (d.kind === 'pine') drawPine(P.g, P.season, s);
-        else if (d.kind === 'rock') drawRock(P.g, P.season, s);
-        else drawBush(P.g, P.season);
-      });
     }
   }
 
-  // ---------------------------------------------------------------- people
+  private decorAt(x: number, y: number): 'tree' | 'pine' | 'rock' | 'bush' | null {
+    if (isRiver(x, y)) return null;
+    if (hasTree(x, y)) return noise(x, y, 4) < 0.45 ? 'pine' : 'tree';
+    const r = noise(x, y, 6);
+    if (r > 0.94) return 'bush';
+    if (r < 0.03) return 'rock';
+    return null;
+  }
 
-  private person(color: string, opt: { hat?: string; hurt?: boolean } = {}): { root: Container; body: Graphics } {
+  // ---------------------------------------------------------------- people and animals
+
+  /** Where a person's day takes them, as a tile area. */
+  private workArea(state: GameState, p: Person): Plot {
+    const built = (t: StructureType) => state.structures.filter((x) => x.type === t && x.built);
+    const pick = <T,>(list: T[], salt: number): T | undefined => list[Math.floor(noise(salt, p.id.length + Number(p.id.slice(1)), 9) * list.length)];
+    const hall = state.structures.find((x) => x.type === 'hall')!;
+    const homeArea = (): Plot => {
+      const homes = state.structures.filter((x) => x.built && STRUCTURES[x.type].housing);
+      const h = pick(homes, 1) ?? hall;
+      const pl = plotOf(h);
+      return { x: pl.x - 0.2, y: pl.y + pl.d, w: pl.w + 0.4, d: 0.8 };
+    };
+    if (isUnwell(p, state.day) || age(p, state.day) < 7) return homeArea();
+    const job: JobId = p.job;
+    const area = (x: { at: Tile; type: StructureType } | undefined, pad = 0.2): Plot | null => {
+      if (!x) return null;
+      const pl = plotAt(x.type, x.at);
+      return { x: pl.x - pad, y: pl.y - pad, w: pl.w + pad * 2, d: pl.d + pad * 2 };
+    };
+    switch (job) {
+      case 'farmer': return area(pick(built('field'), Math.floor(this.time / 20)), -0.1) ?? homeArea();
+      case 'herder': return area(built('pen')[0], 0.8) ?? homeArea();
+      case 'builder': return area(state.structures.find((x) => !x.built), 0.3) ?? homeArea();
+      case 'hideworker': return area(built('smokerack')[0], 0.5) ?? homeArea();
+      case 'potter': return area(built('kiln')[0], 0.5) ?? { x: riverX(9) - 1, y: 8, w: 1, d: 3 };
+      case 'gatherer': {
+        const y = 2 + Math.floor(noise(Number(p.id.slice(1)), 3, 1) * (GRID - 4));
+        return { x: riverX(y) - 1, y, w: 1, d: 1.5 };
+      }
+      case 'woodcutter': {
+        const y = 3 + Math.floor(noise(Number(p.id.slice(1)), 4, 1) * (GRID - 6));
+        return { x: 1, y, w: 2.5, d: 1.5 };
+      }
+      default: {
+        const pl = plotOf(hall);
+        return { x: pl.x - 0.6, y: pl.y + pl.d, w: pl.w + 1.2, d: 1 };
+      }
+    }
+  }
+
+  private makeMover(draw: (g: Graphics) => void, x: number, y: number, speed: number): Mover {
     const root = new Container();
     const body = new Graphics();
-    drawPerson(body, color, opt);
-    body.tint = this.tint;
+    draw(body);
     root.addChild(body);
     this.objects.addChild(root);
-    return { root, body };
+    const m: Mover = { root, body, x, y, tx: x, ty: y, speed, wait: Math.random() * 2 };
+    this.placeAt(m.root, x, y);
+    return m;
   }
 
-  private tavernDoor(state: GameState): Pt | null {
-    const at = state.placements.tavern;
-    if (!at || state.buildings.tavern < 1) return null;
-    const p = plotAt('tavern', at);
-    return [p.x + p.w / 2, p.y + p.d + 0.3];
-  }
-
-  /** From a door to the nearest road, then along it off the edge of the island. */
-  private pathToEdge(door: Pt): Pt[] {
-    const [x, y] = door;
-    if (Math.abs(y - ROAD_C.y) <= Math.abs(x - ROAD_C.x)) {
-      return [door, [x, ROAD_C.y], [x < ROAD_C.x ? -1.2 : GRID + 1.2, ROAD_C.y]];
-    }
-    return [door, [ROAD_C.x, y], [ROAD_C.x, y < ROAD_C.y ? -1.2 : GRID + 1.2]];
-  }
-
-  private walk(a: Adventurer, path: Pt[], delay: number, onDone?: () => void) {
-    const { root, body } = this.person(CLASS_COLORS[a.cls], { hat: a.cls === 'mage' ? '#2c2c80' : undefined });
-    root.visible = false;
-    this.walkers.push({ root, body, path, leg: 0, t: 0, speed: 1.5, delay, onDone });
-  }
-
-  private syncAdventurers(state: GameState) {
-    const door = this.tavernDoor(state);
-    const now = new Map(state.adventurers.map((a) => [a.id, a.status]));
-    const prev = this.knownAdventurers;
-    if (prev && door) {
-      const out = this.pathToEdge(door);
-      const back = [...out].reverse();
-      let departing = 0, returning = 0;
-      for (const a of state.adventurers) {
-        const before = prev.get(a.id);
-        if (before === undefined && a.status === 'idle') {
-          this.walkingIn.add(a.id);
-          this.walk(a, back, 0, () => this.walkingIn.delete(a.id));
-        } else if (before !== 'questing' && before !== undefined && a.status === 'questing') {
-          this.walk(a, out, departing++ * 0.45);
-        } else if (before === 'questing' && a.status !== 'questing') {
-          this.walkingIn.add(a.id);
-          this.walk(a, back, returning++ * 0.45, () => this.walkingIn.delete(a.id));
-        }
-      }
-      for (const [id, status] of prev) {
-        if (!now.has(id) && status === 'idle') {
-          const gone = this.loiterers.get(id);
-          const cls = (gone?.sig as Adventurer['cls']) ?? 'warrior';
-          this.walk({ id, cls } as Adventurer, out, 0);
-        }
-      }
-    }
-    this.knownAdventurers = now;
-
-    // Adventurers waiting at the tavern.
-    const waiting = door ? state.adventurers.filter((a) => a.status !== 'questing' && !this.walkingIn.has(a.id)) : [];
-    const ids = new Set(waiting.map((a) => a.id));
-    for (const [id, e] of this.loiterers) {
-      if (!ids.has(id)) {
-        e.root.destroy({ children: true });
-        this.loiterers.delete(id);
-      }
-    }
-    waiting.slice(0, 8).forEach((a, i) => {
-      const x = door![0] - 0.75 + (i % 4) * 0.45, y = door![1] - 0.05 + Math.floor(i / 4) * 0.45;
-      const hurt = a.status === 'injured';
-      let e = this.loiterers.get(a.id);
-      if (e && e.hurt !== hurt) {
-        e.root.destroy({ children: true });
-        this.loiterers.delete(a.id);
-        e = undefined;
-      }
-      if (!e) {
-        const { root, body } = this.person(CLASS_COLORS[a.cls], { hat: a.cls === 'mage' ? '#2c2c80' : undefined, hurt });
-        // sig keeps the class so a departing adventurer can be drawn after it has left the state
-        e = { sig: a.cls, root, body, lights: new Graphics(), target: 'tavern', hurt };
-        this.loiterers.set(a.id, e);
-      }
-      const [sx, sy] = iso(x, y);
-      e.root.position.set(sx, sy);
-      e.root.zIndex = x + y;
-    });
-  }
-
-  private syncVillagers(count: number) {
-    while (this.villagers.length > count) this.villagers.pop()!.root.destroy({ children: true });
-    while (this.villagers.length < count) {
-      const i = this.villagers.length;
-      const { root, body } = this.person(VILLAGER_COLORS[i % VILLAGER_COLORS.length]);
-      const lane = (hash(i, 9) - 0.5) * 0.5;
-      const along = 0.5 + hash(i, 7) * (GRID - 1);
-      const start: Pt = i % 2 ? [along, ROAD_C.y + lane] : [ROAD_C.x + lane, along];
-      const v: Villager = { root, body, path: [start], leg: 0, t: 0, speed: 0.5 + hash(i, 8) * 0.5, delay: 0, wait: hash(i, 10) * 3, lane };
-      this.villagers.push(v);
-      this.placeWalker(v, start);
-    }
-  }
-
-  private newVillagerPath(v: Villager) {
-    const here = v.path[v.path.length - 1];
-    const onX = Math.abs(here[0] - ROAD_C.x) < 0.4; // on the north-south road
-    const r = Math.random();
-    const along = 0.4 + Math.random() * (GRID - 0.8);
-    const target: Pt = r < 0.5 ? [ROAD_C.x + v.lane, along] : [along, ROAD_C.y + v.lane];
-    const targetOnX = r < 0.5;
-    const cross: Pt = [ROAD_C.x + v.lane, ROAD_C.y + v.lane];
-    v.path = onX === targetOnX ? [here, target] : [here, cross, target];
-    v.leg = 0;
-    v.t = 0;
-  }
-
-  private placeWalker(w: Walker, [x, y]: Pt) {
+  private placeAt(root: Container, x: number, y: number) {
     const [sx, sy] = iso(x, y);
-    w.root.position.set(sx, sy);
-    w.root.zIndex = x + y + 0.05;
-    const outside = Math.max(-x, -y, x - GRID, y - GRID, 0);
-    w.root.alpha = Math.max(0, 1 - outside * 1.2);
+    root.position.set(sx, sy);
+    root.zIndex = x + y + 0.05;
   }
 
-  /** Advance along the path. Returns true when the path is finished. */
-  private step(w: Walker, dt: number): boolean {
-    if (w.delay > 0) {
-      w.delay -= dt;
-      return false;
-    }
-    w.root.visible = true;
-    let move = w.speed * dt;
-    while (move > 0 && w.leg < w.path.length - 1) {
-      const a = w.path[w.leg], b = w.path[w.leg + 1];
-      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
-      if (w.t + move >= len) {
-        move -= len - w.t;
-        w.leg++;
-        w.t = 0;
-      } else {
-        w.t += move;
-        move = 0;
+  private syncPeople(state: GameState) {
+    const shown = state.people.filter((p) => !p.away).slice(0, 48);
+    const ids = new Set(shown.map((p) => p.id));
+    for (const [id, m] of this.people) {
+      if (!ids.has(id)) {
+        m.root.destroy({ children: true });
+        this.people.delete(id);
       }
     }
-    if (w.leg >= w.path.length - 1) {
-      this.placeWalker(w, w.path[w.path.length - 1]);
-      return true;
+    for (const p of shown) {
+      let m = this.people.get(p.id);
+      const area = this.workArea(state, p);
+      if (!m) {
+        const child = age(p, state.day) < 12;
+        m = this.makeMover((g) => {
+          drawPerson(g, CLOTHES[Number(p.id.slice(1)) % CLOTHES.length], { hurt: isUnwell(p, state.day) });
+          if (child) g.scale.set(0.7);
+        }, area.x + area.w / 2, area.y + area.d / 2, child ? 1.1 : 0.8);
+        this.people.set(p.id, m);
+      }
+      (m as Mover & { area?: Plot }).area = area;
     }
-    const a = w.path[w.leg], b = w.path[w.leg + 1];
-    const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
-    const f = w.t / len;
-    this.placeWalker(w, [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
-    w.body.y = -Math.abs(Math.sin(this.time * 9 + w.speed * 10)) * 1.2; // a little bob
-    return false;
   }
 
-  // ---------------------------------------------------------------- lighting, ground, overlay
-
-  private syncLighting(state: GameState) {
-    const dark = darkness(hourOfDay(state));
-    const tint = mix(0xffffff, 0x404a7a, dark / 0.5);
-    const lit = dark > 0.15;
-    if (tint === this.tint && lit === this.lit) return;
-    this.tint = tint;
-    this.lit = lit;
-    this.groundG.tint = tint;
-    for (const e of [...this.entities.values(), ...this.loiterers.values()]) {
-      e.body.tint = tint;
-      if (e.flag) e.flag.tint = tint;
-      e.lights.visible = lit;
+  private syncGoats(state: GameState) {
+    const pen = state.structures.find((x) => x.type === 'pen' && x.built);
+    const want = pen ? Math.min(state.goats, 24) : 0;
+    while (this.goats.length > want) this.goats.pop()!.root.destroy({ children: true });
+    if (!pen) return;
+    const pl = plotOf(pen);
+    while (this.goats.length < want) {
+      const i = this.goats.length;
+      const m = this.makeMover((g) => drawGoat(g, GOAT_COLORS[i % GOAT_COLORS.length]), pl.x + 0.3 + Math.random() * (pl.w - 0.6), pl.y + 0.3 + Math.random() * (pl.d - 0.6), 0.4);
+      (m as Mover & { area?: Plot }).area = { x: pl.x + 0.25, y: pl.y + 0.25, w: pl.w - 0.5, d: pl.d - 0.5 };
+      this.goats.push(m);
     }
-    for (const w of [...this.walkers, ...this.villagers]) w.body.tint = tint;
-    for (const p of this.particles) if (p.kind === 'smoke') p.g.tint = tint;
-    this.weather.tint = mix(0xffffff, 0x8090c0, dark / 0.5);
-    for (const f of this.fireflies) f.visible = lit && this.season !== 'winter';
   }
+
+  /** Journeys: walk out to the map edge when they leave, and back in when they return. */
+  private syncTrips(state: GameState) {
+    const hall = plotOf(state.structures.find((x) => x.type === 'hall')!);
+    const door: Pt = [hall.x + hall.w / 2, hall.y + hall.d + 0.4];
+    const ids = new Set(state.expeditions.map((e) => e.id));
+    if (this.tripsReady) {
+      for (const e of state.expeditions) {
+        if (this.knownTrips.has(e.id)) continue;
+        e.members.forEach((_, i) => this.travel([door, this.edgeFor(e.kind, e.target, i)], i * 0.5));
+      }
+      for (const id of this.knownTrips) {
+        if (ids.has(id)) continue;
+        // Returned: we no longer know who, so send back a small party.
+        for (let i = 0; i < 2; i++) this.travel([this.edgeFor('trade', 'chalk', i), door], i * 0.5);
+      }
+    }
+    this.knownTrips = ids;
+    this.tripsReady = true;
+  }
+
+  private edgeFor(kind: string, target: string, i: number): Pt {
+    if (kind === 'hunt') return [-1.5, 4 + i * 0.6];
+    const dir = NEIGHBORS.find((n) => n.id === target)?.dir ?? 'west';
+    if (dir === 'south') return [riverX(GRID - 1) - 1 - i * 0.4, GRID + 1.5];
+    if (dir === 'north') return [8 + i * 0.4, -1.5];
+    return [-1.5, 9 + i * 0.4];
+  }
+
+  private travel(path: Pt[], delay: number) {
+    const root = new Container();
+    const body = new Graphics();
+    drawPerson(body, '#5a4a32');
+    root.addChild(body);
+    root.visible = false;
+    this.objects.addChild(root);
+    this.travellers.push({ root, body, path, leg: 0, t: 0, delay });
+  }
+
+  // ---------------------------------------------------------------- ground and overlay
 
   private drawGround() {
     const g = this.groundG;
     g.clear();
     const col = GROUND[this.season ?? 'spring'];
     const depth = 22;
-    const P = (x: number, y: number, z = 0) => iso(x, y, z);
     const poly = (ps: Pt[], color: string, alpha = 1) => g.poly(ps.flatMap((p) => p)).fill({ color, alpha });
     g.ellipse(0, GRID * 16 + 40, GRID * 40, GRID * 20).fill({ color: '#000000', alpha: 0.25 });
-    poly([P(0, GRID), P(GRID, GRID), P(GRID, GRID, -depth), P(0, GRID, -depth)], '#5c4330');
-    poly([P(GRID, 0), P(GRID, GRID), P(GRID, GRID, -depth), P(GRID, 0, -depth)], '#7a5a3f');
-    poly([P(0, GRID), P(GRID, GRID), P(GRID, GRID, -6), P(0, GRID, -6)], shade(col.edge, -0.1));
-    poly([P(GRID, 0), P(GRID, GRID), P(GRID, GRID, -6), P(GRID, 0, -6)], col.edge);
+    poly([iso(0, GRID), iso(GRID, GRID), iso(GRID, GRID, -depth), iso(0, GRID, -depth)], '#5c4330');
+    poly([iso(GRID, 0), iso(GRID, GRID), iso(GRID, GRID, -depth), iso(GRID, 0, -depth)], '#7a5a3f');
+    poly([iso(0, GRID), iso(GRID, GRID), iso(GRID, GRID, -6), iso(0, GRID, -6)], shade(col.edge, -0.1));
+    poly([iso(GRID, 0), iso(GRID, GRID), iso(GRID, GRID, -6), iso(GRID, 0, -6)], col.edge);
     for (let x = 0; x < GRID; x++) {
       for (let y = 0; y < GRID; y++) {
-        const road = isRoad(x, y);
-        const base = road ? col.road : col.grass;
-        poly([P(x, y), P(x + 1, y), P(x + 1, y + 1), P(x, y + 1)], shade(base, (hash(x, y, 9) - 0.5) * (road ? 0.08 : 0.12)));
+        const river = isRiver(x, y);
+        const base = river ? col.water : isBank(x, y) ? col.bank : col.grass;
+        poly([iso(x, y), iso(x + 1, y), iso(x + 1, y + 1), iso(x, y + 1)], shade(base, (noise(x, y, 9) - 0.5) * (river ? 0.06 : 0.12)));
       }
     }
-    // the village well at the crossroads
-    const [cx, cy] = iso(ROAD_C.x, ROAD_C.y);
-    g.ellipse(cx, cy, 11, 5.5).fill('#8b8a85').stroke(STROKE);
-    g.ellipse(cx, cy - 1, 7, 3.5).fill(this.season === 'winter' ? '#b8d0e0' : '#2b4a63');
-    g.moveTo(cx - 9, cy).lineTo(cx - 9, cy - 16).stroke({ width: 1.6, color: '#5b3d22' });
-    g.moveTo(cx + 9, cy).lineTo(cx + 9, cy - 16).stroke({ width: 1.6, color: '#5b3d22' });
-    g.poly([cx - 12, cy - 15, cx + 12, cy - 15, cx, cy - 23]).fill(this.season === 'winter' ? '#eef2f6' : '#8c3b2e');
+    // ripples on the water, reeds on the banks
+    for (let y = 0; y < GRID; y++) {
+      const rx = riverX(y);
+      for (let k = 0; k < 3; k++) {
+        const [sx, sy] = iso(rx + 0.4 + k * 0.5, y + noise(rx, y, k) * 0.9);
+        g.moveTo(sx - 5, sy).lineTo(sx + 5, sy).stroke({ width: 1, color: '#ffffff', alpha: this.season === 'winter' ? 0.15 : 0.3 });
+      }
+      if (this.season !== 'winter') {
+        for (const bx of [rx - 1, rx + 2]) {
+          if (bx < 0 || bx >= GRID || !isBank(bx, y)) continue;
+          for (let k = 0; k < 4; k++) {
+            const [sx, sy] = iso(bx + (bx < rx ? 0.7 : 0.1) + noise(bx, y, k) * 0.25, y + k * 0.25);
+            g.moveTo(sx, sy).lineTo(sx + 1, sy - 7).stroke({ width: 1, color: '#5f7a35' });
+          }
+        }
+      }
+    }
   }
 
   private drawOverlay() {
@@ -659,16 +597,9 @@ export class VillageScene {
     const { state, selected, placing } = props;
     const diamond = (p: Plot) => [iso(p.x, p.y), iso(p.x + p.w, p.y), iso(p.x + p.w, p.y + p.d), iso(p.x, p.y + p.d)].flatMap((q) => q);
 
-    // selection and hover outlines
-    const plots = placedPlots(state);
-    if (selected && !placing) {
-      for (const pp of plots.filter((q) => q.id === selected && !q.underConstruction)) {
-        g.poly(diamond(pp.plot)).fill({ color: '#d9a441', alpha: 0.18 }).stroke({ width: 1.6, color: '#ffd36b' });
-      }
-    }
-    if (this.hovered?.plot && !placing) {
-      g.poly(diamond(this.hovered.plot)).fill({ color: '#ffffff', alpha: 0.1 }).stroke({ width: 1, color: '#ffffff', alpha: 0.6 });
-    }
+    const sel = selected ? state.structures.find((x) => x.id === selected) : undefined;
+    if (sel && !placing) g.poly(diamond(plotOf(sel))).fill({ color: '#d9a441', alpha: 0.18 }).stroke({ width: 1.6, color: '#ffd36b' });
+    if (this.hovered?.plot && !placing) g.poly(diamond(this.hovered.plot)).fill({ color: '#ffffff', alpha: 0.1 }).stroke({ width: 1, color: '#ffffff', alpha: 0.6 });
 
     // placement ghost
     this.ghostText.visible = false;
@@ -681,50 +612,41 @@ export class VillageScene {
       if (sig !== this.ghostSig) {
         this.ghost.removeChildren().forEach((c) => c.destroy());
         const body = new Graphics();
-        const index = placing === 'house' ? state.houses.length : 0;
-        drawBuilding(new Painter(body, new Graphics(), this.season ?? 'spring'), placing, plot.w, plot.d, 1, index);
+        drawStructure(new Painter(body, new Graphics(), this.season ?? 'spring'), placing, plot.w, plot.d, { stage: 'unsown' });
         this.ghost.addChild(body);
         this.ghostSig = sig;
       }
       const [gx, gy] = iso(plot.x, plot.y);
       this.ghost.position.set(gx, gy);
       this.ghost.visible = true;
-      if (blocker) {
+      const trees = blocker ? 0 : treesOn(state, placing, this.ghostTile);
+      const text = blocker ?? (trees ? `${trees} tile${trees > 1 ? 's' : ''} of forest to clear` : '');
+      if (text) {
         const [tx, ty] = iso(plot.x + plot.w / 2, plot.y + plot.d / 2, 46);
-        this.ghostText.text = blocker;
+        this.ghostText.text = text;
         this.ghostText.position.set(tx, ty);
         this.ghostText.visible = true;
       }
     }
 
-    // label for the selected building
+    // label for the selection
     this.selLabel.visible = false;
-    if (selected && !placing) {
-      const pp = plots.find((q) => q.id === selected && !q.underConstruction);
-      const e = pp && this.entities.get(selected === 'house' ? 'house0' : selected);
-      if (pp && e) {
-        const [lx, ly] = iso(pp.plot.x + pp.plot.w / 2, pp.plot.y + pp.plot.d / 2, (e.meta?.top ?? 40) + 4);
-        this.selLabel.text = `${BUILDINGS[selected].name} · ${state.buildings[selected]}`;
-        this.selLabel.position.set(lx, ly);
-        this.selLabel.visible = true;
-      }
+    if (sel && !placing) {
+      const p = plotOf(sel);
+      const e = this.entities.get(sel.id);
+      const [lx, ly] = iso(p.x + p.w / 2, p.y + p.d / 2, (e?.meta?.top ?? 40) + 6);
+      this.selLabel.text = STRUCTURES[sel.type].name;
+      this.selLabel.position.set(lx, ly);
+      this.selLabel.visible = true;
     }
 
-    // construction progress
-    const c = state.construction;
-    this.buildBar.clear();
-    this.buildLabel.visible = false;
-    if (c) {
-      const pp = c.at ? plotAt(c.building, c.at) : plots.find((q) => q.id === c.building && !q.underConstruction)?.plot;
-      if (pp) {
-        const progress = Math.max(0, Math.min(1, 1 - (c.endsTick - state.tick) / buildHours(c.building, c.targetLevel)));
-        const [bx, by] = iso(pp.x + pp.w / 2, pp.y + pp.d / 2, c.building === 'house' ? 40 : 66);
-        this.buildBar.roundRect(bx - 26, by - 5, 52, 8, 4).fill({ color: '#140e08', alpha: 0.85 });
-        this.buildBar.roundRect(bx - 24, by - 3, 48 * progress, 4, 2).fill('#d9a441');
-        this.buildLabel.text = `${BUILDINGS[c.building].name} ${c.targetLevel}`;
-        this.buildLabel.position.set(bx, by - 7);
-        this.buildLabel.visible = true;
-      }
+    // progress bars over building sites
+    this.bars.clear();
+    for (const x of state.structures.filter((v) => !v.built)) {
+      const p = plotOf(x);
+      const [bx, by] = iso(p.x + p.w / 2, p.y + p.d / 2, 34);
+      this.bars.roundRect(bx - 22, by - 4, 44, 7, 3.5).fill({ color: '#140e08', alpha: 0.85 });
+      this.bars.roundRect(bx - 20, by - 2.5, 40 * Math.min(1, x.work / x.workNeeded), 4, 2).fill('#d9a441');
     }
   }
 
@@ -734,28 +656,15 @@ export class VillageScene {
     this.weather.removeChildren().forEach((c) => c.destroy());
     this.particles = this.particles.filter((p) => p.kind === 'smoke');
     const kind = ({ winter: 'snow', autumn: 'leaf', spring: 'petal', summer: null } as const)[this.season ?? 'spring'];
-    if (kind) {
-      const n = kind === 'snow' ? 140 : 36;
-      for (let i = 0; i < n; i++) {
-        const g = new Graphics();
-        if (kind === 'snow') g.circle(0, 0, 1.2 + Math.random() * 1.2).fill({ color: '#ffffff', alpha: 0.9 });
-        else g.ellipse(0, 0, 2.6, 1.3).fill(kind === 'leaf' ? ['#d9822b', '#b9541f', '#e6a83a'][i % 3] : '#f4b6c8');
-        g.position.set(-560 + Math.random() * 1120, -240 + Math.random() * 820);
-        this.weather.addChild(g);
-        this.particles.push({ g, life: 0, max: Infinity, vx: (Math.random() - 0.5) * 8, vy: kind === 'snow' ? 18 + Math.random() * 16 : 10 + Math.random() * 8, kind, phase: Math.random() * 6 });
-      }
-    }
-    if (this.fireflies.length === 0) {
-      for (let i = 0; i < 16; i++) {
-        const f = new Graphics();
-        f.circle(0, 0, 5).fill({ color: LIGHT, alpha: 0.15 });
-        f.circle(0, 0, 1.4).fill('#fff3a0');
-        const [x, y] = iso(1 + hash(i, 21) * 14, 1 + hash(i, 22) * 14, 6 + hash(i, 23) * 14);
-        f.position.set(x, y);
-        f.visible = false;
-        this.fx.addChild(f);
-        this.fireflies.push(f);
-      }
+    if (!kind) return;
+    const n = kind === 'snow' ? 150 : 36;
+    for (let i = 0; i < n; i++) {
+      const g = new Graphics();
+      if (kind === 'snow') g.circle(0, 0, 1.2 + Math.random() * 1.2).fill({ color: '#ffffff', alpha: 0.9 });
+      else g.ellipse(0, 0, 2.6, 1.3).fill(kind === 'leaf' ? ['#d9822b', '#b9541f', '#e6a83a'][i % 3] : '#f4b6c8');
+      g.position.set(-620 + Math.random() * 1240, -260 + Math.random() * 900);
+      this.weather.addChild(g);
+      this.particles.push({ g, life: 0, max: Infinity, vx: (Math.random() - 0.5) * 8, vy: kind === 'snow' ? 18 + Math.random() * 16 : 10 + Math.random() * 8, kind, phase: Math.random() * 6 });
     }
   }
 
@@ -765,7 +674,6 @@ export class VillageScene {
         const g = new Graphics();
         g.circle(0, 0, 4).fill('#c9c4bd');
         g.position.set(e.root.x + sx, e.root.y + sy);
-        g.tint = this.tint;
         this.fx.addChild(g);
         this.particles.push({ g, life: 0, max: 3.3, vx: 3 + Math.random() * 2, vy: -11 - Math.random() * 3, kind: 'smoke', phase: 0 });
       }
@@ -774,26 +682,66 @@ export class VillageScene {
 
   // ---------------------------------------------------------------- frame
 
+  private wander(m: Mover & { area?: Plot }, dt: number) {
+    if (m.wait > 0) {
+      m.wait -= dt;
+      return;
+    }
+    const dx = m.tx - m.x, dy = m.ty - m.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 0.05) {
+      const a = m.area;
+      if (a) {
+        // Far from the work area: walk there; otherwise potter about inside it.
+        m.tx = a.x + Math.random() * a.w;
+        m.ty = a.y + Math.random() * a.d;
+      }
+      m.wait = 0.5 + Math.random() * 2.5;
+      return;
+    }
+    const step = Math.min(dist, m.speed * dt * (dist > 3 ? 2 : 1));
+    m.x += (dx / dist) * step;
+    m.y += (dy / dist) * step;
+    this.placeAt(m.root, m.x, m.y);
+    m.body.y = -Math.abs(Math.sin(this.time * 9 + m.speed * 10)) * 1.2;
+  }
+
   private animate(dt: number) {
     dt = Math.min(dt, 0.1);
     this.time += dt;
+    for (const m of this.people.values()) this.wander(m, dt);
+    for (const m of this.goats) this.wander(m, dt);
 
-    for (const v of this.villagers) {
-      if (v.wait > 0) {
-        v.wait -= dt;
-        continue;
+    this.travellers = this.travellers.filter((w) => {
+      if (w.delay > 0) {
+        w.delay -= dt;
+        return true;
       }
-      if (this.step(v, dt)) {
-        v.wait = 0.5 + Math.random() * 3;
-        this.newVillagerPath(v);
+      w.root.visible = true;
+      let move = 1.4 * dt;
+      while (move > 0 && w.leg < w.path.length - 1) {
+        const a = w.path[w.leg], b = w.path[w.leg + 1];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        if (w.t + move >= len) {
+          move -= len - w.t;
+          w.leg++;
+          w.t = 0;
+        } else {
+          w.t += move;
+          move = 0;
+        }
       }
-    }
-    this.walkers = this.walkers.filter((w) => {
-      if (!this.step(w, dt)) return true;
-      w.root.destroy({ children: true });
-      w.onDone?.();
-      if (w.onDone && this.props) this.syncAdventurers(this.props.state);
-      return false;
+      if (w.leg >= w.path.length - 1) {
+        w.root.destroy({ children: true });
+        return false;
+      }
+      const a = w.path[w.leg], b = w.path[w.leg + 1];
+      const f = w.t / (Math.hypot(b[0] - a[0], b[1] - a[1]) || 1);
+      const x = a[0] + (b[0] - a[0]) * f, y = a[1] + (b[1] - a[1]) * f;
+      this.placeAt(w.root, x, y);
+      w.root.alpha = Math.max(0, 1 - Math.max(-x, -y, x - GRID, y - GRID, 0) * 0.8);
+      w.body.y = -Math.abs(Math.sin(this.time * 9)) * 1.2;
+      return true;
     });
 
     this.smokeTimer += dt;
@@ -818,29 +766,11 @@ export class VillageScene {
       p.g.x += (p.vx + Math.sin(this.time * 1.5 + p.phase) * 10) * dt;
       p.g.y += p.vy * dt;
       if (p.kind !== 'snow') p.g.rotation += dt * 2;
-      if (p.g.y > 600) {
-        p.g.y = -240;
-        p.g.x = -560 + Math.random() * 1120;
+      if (p.g.y > 640) {
+        p.g.y = -260;
+        p.g.x = -620 + Math.random() * 1240;
       }
       return true;
     });
-
-    for (const e of this.entities.values()) {
-      if (e.flag) {
-        e.flag.skew.y = Math.sin(this.time * 4) * 0.12;
-        e.flag.scale.x = 0.92 + Math.sin(this.time * 4 + 1) * 0.08;
-      }
-    }
-    this.fireflies.forEach((f, i) => {
-      f.alpha = 0.3 + 0.7 * Math.abs(Math.sin(this.time * 1.3 + i));
-      f.y += Math.sin(this.time + i) * 0.08;
-    });
   }
-}
-
-function labelStyle(size: number) {
-  return {
-    fontFamily: 'Georgia, serif', fontSize: size, fontWeight: '600' as const, fill: '#fff6e0',
-    stroke: { color: '#140c04', width: 3 }, align: 'center' as const,
-  };
 }

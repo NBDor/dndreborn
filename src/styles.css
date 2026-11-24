@@ -202,3 +202,54 @@ button.small { padding: 2px 8px; font-size: 12px; }
 .season-spring { border-color: #8fc46a; }
 .season-summer { border-color: #e6c34a; }
 .hint { margin-top: 8px; color: var(--muted); font-size: 13px; }
+
+/* ---------------------------------------------------------------- era 1 panels */
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.dim { opacity: 0.55; }
+.block { display: block; }
+
+.advisor { list-style: none; margin: 8px 0 0; padding: 8px 0 0; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.advisor li.bad { color: var(--bad); font-weight: 600; }
+.advisor li.warn { color: #e0b060; }
+
+.bar { width: 90px; height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; display: inline-block; vertical-align: middle; }
+.bar > div { height: 100%; background: var(--good); }
+.bar.low > div { background: var(--bad); }
+
+.jobs { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px 14px; }
+.job-count { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.stepper { display: inline-flex; align-items: center; gap: 6px; }
+.stepper button { padding: 0 8px; }
+.stepper b { min-width: 22px; text-align: center; font-variant-numeric: tabular-nums; }
+
+table.people, table.stores { width: 100%; border-collapse: collapse; }
+.people th, .stores th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 4px 6px; }
+.people td, .stores td { padding: 5px 6px; border-top: 1px solid var(--border); vertical-align: middle; }
+.people select, .tech select, .row select {
+  font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px;
+  max-width: 100%;
+}
+.skills { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip-skill { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); white-space: nowrap; }
+.people tr.dim td { opacity: 0.7; }
+
+.techs, .journeys, .neighbors { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; margin-top: 8px; }
+.tech, .journey, .neighbor { background: var(--panel-2); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.tech header { display: flex; gap: 8px; align-items: center; }
+.tech.locked, .tech.future { opacity: 0.65; }
+.known { display: flex; flex-wrap: wrap; gap: 8px; }
+.known details { background: var(--panel-2); border-radius: 8px; padding: 6px 10px; max-width: 360px; }
+.known summary { cursor: pointer; }
+
+.members { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.members label { display: inline-flex; gap: 4px; align-items: center; padding: 2px 6px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.members label.picked { background: var(--panel); outline: 1px solid var(--accent); }
+.trade { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.cargo { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px 12px; }
+.cargo-item { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+.away { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.away .bar { width: 100%; }
+
+.build-menu { display: flex; flex-direction: column; gap: 8px; }
+.build-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
+.herd p { margin: 4px 0; }

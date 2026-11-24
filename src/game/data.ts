@@ -1,261 +1,422 @@
-// Static game content: items, buildings, recipes, quests, adventurer classes.
-import type { AdventurerClass, BuildingId, Inventory, ItemCategory, ItemId } from './types';
+// Era 1 content: First Villages. Numbers are real-world approximations; the comments say where they come from.
+// See docs/design.md for the rules this content follows.
+import type { Amounts, ItemId, JobId, SeasonId, SkillId, StructureType, TechId } from './types';
 
-export const TICKS_PER_DAY = 24; // one tick is one in-game hour
-export const BASE_STORAGE = 150;
-export const STORAGE_PER_WAREHOUSE = 150;
-export const BASE_HOUSING = 4;
-export const HOUSING_PER_HOUSE = 4;
-export const FOOD_PER_VILLAGER = 1; // per day
-export const TAX_PER_VILLAGER = 1.5; // gold per day
-export const UPKEEP_PER_LEVEL = 0.5; // gold per building level per day
+// ---------------------------------------------------------------- calendar
+
+export const DAYS_PER_SEASON = 91;
+export const DAYS_PER_YEAR = DAYS_PER_SEASON * 4; // 364
+
+export interface SeasonDef {
+  id: SeasonId;
+  name: string;
+  icon: string;
+  /** Firewood burned per occupied house per day for warmth, kg. Cooking fuel is counted per person. */
+  heating: number;
+  /** Fraction of the day's wild-food gathering per kind, per gatherer-day, in kg. */
+  gathering: Partial<Record<'fish' | 'wild_food' | 'nuts', number>>;
+  description: string;
+}
+
+export const SEASONS: SeasonDef[] = [
+  { id: 'spring', name: 'Spring', icon: '🌱', heating: 4, gathering: { fish: 2.5, wild_food: 2 },
+    description: 'Sowing time. Fish run in the river; greens and eggs to gather.' },
+  { id: 'summer', name: 'Summer', icon: '☀️', heating: 0, gathering: { fish: 2, wild_food: 4 },
+    description: 'Crops grow and need weeding. Berries ripen. Herders cut leaf fodder for winter.' },
+  { id: 'autumn', name: 'Autumn', icon: '🍂', heating: 4, gathering: { nuts: 1.8, wild_food: 1.5, fish: 1.5 },
+    description: 'Harvest, hazelnuts and deer at their fattest. Prepare for winter.' },
+  { id: 'winter', name: 'Winter', icon: '❄️', heating: 14, gathering: { fish: 0.8, wild_food: 0.2 },
+    description: 'Nothing grows. The village lives on its stores, firewood and warm clothes.' },
+];
+
+// ---------------------------------------------------------------- people
+
+/** kcal per day. Adults doing heavy work burn about 2,400–3,000; children and elders less. */
+export const KCAL_CHILD = 1400;
+export const KCAL_ADULT = 2400;
+export const KCAL_ELDER = 1900;
+export const CHILD_AGE = 12; // works and learns as a helper from 7, fully from 12
+export const HELPER_AGE = 7;
+export const ELDER_AGE = 55;
+/** Firewood for cooking, kg per person per day (open hearths are inefficient). */
+export const COOKING_WOOD = 1.2;
+/** A person can carry about this much on a long walk, kg. */
+export const CARRY_KG = 25;
+
+export const FIRST_NAMES_F = [
+  'Aru', 'Bena', 'Kessa', 'Ilo', 'Teska', 'Oda', 'Mira', 'Sael', 'Yuna', 'Lirra', 'Neve', 'Asha', 'Tavi', 'Ebru',
+  'Hesk', 'Wenna', 'Dalis', 'Fio', 'Runa', 'Isse',
+];
+export const FIRST_NAMES_M = [
+  'Doran', 'Maro', 'Vann', 'Rhun', 'Tobek', 'Esk', 'Garro', 'Halun', 'Joss', 'Kel', 'Lomir', 'Ostav', 'Peln',
+  'Sorr', 'Ulmo', 'Barek', 'Corin', 'Davo', 'Fenn', 'Ivar',
+];
+
+// ---------------------------------------------------------------- items
+
+export type ItemCategory = 'food' | 'material' | 'tool' | 'goods';
 
 export interface ItemDef {
   id: ItemId;
   name: string;
   icon: string;
   category: ItemCategory;
+  /** 'kg' items are counted by weight; others by piece. */
+  unit: 'kg' | 'pc';
+  /** Weight of one unit, kg (for carrying). */
+  weight: number;
+  /** Food energy per unit. */
+  kcal?: number;
+  /** Labour-days it takes to produce one unit: the basis of barter value. */
   value: number;
+  /** Fraction lost per day, by season (spring, summer, autumn, winter). */
+  spoil: [number, number, number, number];
   description: string;
 }
 
+const none: [number, number, number, number] = [0, 0, 0, 0];
+
 export const ITEMS: Record<ItemId, ItemDef> = {
-  food: { id: 'food', name: 'Food', icon: '🌾', category: 'resource', value: 1, description: 'Feeds villagers. Each villager eats 1 per day.' },
-  wood: { id: 'wood', name: 'Wood', icon: '🪵', category: 'resource', value: 1, description: 'Basic construction material.' },
-  stone: { id: 'stone', name: 'Stone', icon: '🪨', category: 'resource', value: 2, description: 'Sturdy construction material.' },
-  iron_ore: { id: 'iron_ore', name: 'Iron Ore', icon: '⛏️', category: 'resource', value: 3, description: 'Smelted into ingots at the smithy.' },
-  herbs: { id: 'herbs', name: 'Herbs', icon: '🌿', category: 'resource', value: 2, description: 'Brewed into potions.' },
-  pelts: { id: 'pelts', name: 'Pelts', icon: '🦊', category: 'resource', value: 3, description: 'Hides brought back from the wilds.' },
-  planks: { id: 'planks', name: 'Planks', icon: '🪚', category: 'material', value: 4, description: 'Processed wood for finer buildings.' },
-  iron_ingot: { id: 'iron_ingot', name: 'Iron Ingot', icon: '🔩', category: 'material', value: 10, description: 'Refined iron for tools and weapons.' },
-  tools: { id: 'tools', name: 'Tools', icon: '🛠️', category: 'material', value: 25, description: 'Needed for advanced construction.' },
-  rations: { id: 'rations', name: 'Rations', icon: '🥖', category: 'supply', value: 6, description: 'Quest supply: +3% success each.' },
-  healing_potion: { id: 'healing_potion', name: 'Healing Potion', icon: '🧪', category: 'supply', value: 15, description: 'Quest supply: +4% success and lowers injury risk.' },
-  iron_sword: { id: 'iron_sword', name: 'Iron Sword', icon: '🗡️', category: 'gear', value: 40, description: 'Quest gear: +3 power for one adventurer.' },
-  leather_armor: { id: 'leather_armor', name: 'Leather Armor', icon: '🦺', category: 'gear', value: 35, description: 'Quest gear: +2 power and lowers death risk.' },
-  monster_parts: { id: 'monster_parts', name: 'Monster Parts', icon: '🦴', category: 'treasure', value: 30, description: 'Rare trophies. Prized by merchants.' },
-  relic: { id: 'relic', name: 'Ancient Relic', icon: '🏺', category: 'treasure', value: 120, description: 'A priceless artifact from forgotten ages.' },
+  grain: { id: 'grain', name: 'Emmer grain', icon: '🌾', category: 'food', unit: 'kg', weight: 1, kcal: 3400, value: 0.03,
+    spoil: [0.0012, 0.0015, 0.0012, 0.0006],
+    description: 'Hulled wheat. Stores for a year if kept dry and away from mice. Also the seed for next year.' },
+  meat: { id: 'meat', name: 'Fresh meat', icon: '🍖', category: 'food', unit: 'kg', weight: 1, kcal: 1500, value: 0.05,
+    spoil: [0.08, 0.15, 0.08, 0.03], description: 'Rots within days unless smoked or eaten.' },
+  smoked_meat: { id: 'smoked_meat', name: 'Smoked meat', icon: '🥓', category: 'food', unit: 'kg', weight: 1, kcal: 2500, value: 0.12,
+    spoil: [0.002, 0.003, 0.002, 0.001], description: 'Smoke and drying stop rot. Lighter and richer than fresh meat.' },
+  fish: { id: 'fish', name: 'Fish', icon: '🐟', category: 'food', unit: 'kg', weight: 1, kcal: 1000, value: 0.04,
+    spoil: [0.12, 0.2, 0.12, 0.05], description: 'From the river. Spoils fast.' },
+  wild_food: { id: 'wild_food', name: 'Wild food', icon: '🫐', category: 'food', unit: 'kg', weight: 1, kcal: 500, value: 0.04,
+    spoil: [0.25, 0.3, 0.25, 0.1], description: 'Greens, roots, berries, mushrooms. Eaten fresh.' },
+  nuts: { id: 'nuts', name: 'Hazelnuts', icon: '🌰', category: 'food', unit: 'kg', weight: 1, kcal: 6300, value: 0.25,
+    spoil: [0.001, 0.002, 0.0005, 0.0005], description: 'Rich in fat and protein, and keep through winter. Gathered in autumn.' },
+  cheese: { id: 'cheese', name: 'Cheese', icon: '🧀', category: 'food', unit: 'kg', weight: 1, kcal: 3500, value: 0.6,
+    spoil: [0.002, 0.004, 0.002, 0.001],
+    description: 'Ten litres of milk make about one kilo. Making cheese removes most of the lactose adults cannot digest.' },
+
+  straw: { id: 'straw', name: 'Straw', icon: '🌿', category: 'material', unit: 'kg', weight: 1, value: 0.005,
+    spoil: none, description: 'Left after threshing: about as much straw as grain. Thatch, bedding, temper for daub.' },
+  wood: { id: 'wood', name: 'Wood', icon: '🪵', category: 'material', unit: 'kg', weight: 1, value: 0.02,
+    spoil: none, description: 'Posts, wattle and firewood. A household burns kilos every day.' },
+  clay: { id: 'clay', name: 'Clay', icon: '🟫', category: 'material', unit: 'kg', weight: 1, value: 0.01,
+    spoil: none, description: 'Dug from the riverbank. For daub walls and, once known, pottery.' },
+  flint: { id: 'flint', name: 'Flint', icon: '🪨', category: 'material', unit: 'kg', weight: 1, value: 0.4,
+    spoil: none,
+    description: 'Breaks in sharp, predictable flakes. River nodules are small and flawed; mined chalk flint is far better.' },
+  antler: { id: 'antler', name: 'Antler', icon: '🦌', category: 'material', unit: 'pc', weight: 1.5, value: 0.3,
+    spoil: none, description: 'Red-deer antler: picks for digging and soft hammers for knapping.' },
+  raw_hide: { id: 'raw_hide', name: 'Raw hide', icon: '🐂', category: 'material', unit: 'pc', weight: 6, value: 0.4,
+    spoil: [0.04, 0.07, 0.04, 0.01], description: 'Rots unless scraped and smoked soon.' },
+  leather: { id: 'leather', name: 'Leather', icon: '🟤', category: 'material', unit: 'pc', weight: 2, value: 3.5,
+    spoil: [0.0005, 0.0008, 0.0005, 0.0003], description: 'Scraped, brain-softened and smoked hide.' },
+  fodder: { id: 'fodder', name: 'Fodder', icon: '🍃', category: 'material', unit: 'kg', weight: 1, value: 0.02,
+    spoil: [0.002, 0.002, 0.001, 0.0005], description: 'Dried leaves and hay for the goats in winter.' },
+
+  clothing: { id: 'clothing', name: 'Clothing', icon: '🧥', category: 'goods', unit: 'pc', weight: 1.5, value: 9,
+    spoil: none, description: 'Leather garments. Everyone needs one in winter; they wear out in about a year.' },
+  pot: { id: 'pot', name: 'Pot', icon: '🏺', category: 'goods', unit: 'pc', weight: 3, value: 1.5,
+    spoil: none, description: 'Keeps grain from damp and mice, and lets milk be made into cheese.' },
+  sickle: { id: 'sickle', name: 'Sickle', icon: '🌙', category: 'tool', unit: 'pc', weight: 0.4, value: 0.8,
+    spoil: none, description: 'Flint blades set in a wooden haft. Harvesting without one is slow.' },
+  axe: { id: 'axe', name: 'Axe', icon: '🪓', category: 'tool', unit: 'pc', weight: 1.5, value: 1.5,
+    spoil: none, description: 'For felling trees and shaping timber.' },
+  scraper: { id: 'scraper', name: 'Scraper', icon: '🔪', category: 'tool', unit: 'pc', weight: 0.1, value: 0.2,
+    spoil: none, description: 'For cleaning hides.' },
+  arrows: { id: 'arrows', name: 'Arrows', icon: '🏹', category: 'tool', unit: 'pc', weight: 0.3, value: 0.8,
+    spoil: none, description: 'A bundle of ten flint-tipped arrows. Many are lost on every hunt.' },
 };
 
 export const ITEM_ORDER = Object.keys(ITEMS) as ItemId[];
+export const FOODS = ITEM_ORDER.filter((id) => ITEMS[id].kcal);
 
-export interface BuildingDef {
-  id: BuildingId;
+/** How long a tool lasts in worker-days at quality 0.5. Better tools last longer. */
+export const TOOL_LIFE: Partial<Record<ItemId, number>> = { sickle: 120, axe: 200, scraper: 30 }; // with resharpening
+
+// ---------------------------------------------------------------- jobs and skills
+
+export interface JobDef {
+  id: JobId;
   name: string;
   icon: string;
+  skill?: SkillId;
+  tool?: ItemId;
+  /** Chance per worker-day of an accident, and how bad it is. */
+  accident?: { chance: number; days: [number, number]; harm: number; what: string };
   description: string;
-  maxLevel: number;
-  /** Cost to build level 1. Scaled by `costGrowth` per further level. */
-  baseCost: { gold: number; items: Inventory };
-  costGrowth: number;
-  /** Construction hours per target level. */
-  buildHours: number;
-  workersPerLevel: number;
-  produces?: { item: ItemId; perLevelPerDay: number };
 }
 
-export const BUILDINGS: Record<BuildingId, BuildingDef> = {
-  town_hall: {
-    id: 'town_hall', name: 'Town Hall', icon: '🏛️', maxLevel: 5,
-    description: 'Seat of the village. Its level caps every other building at twice its level + 1. Needs reputation to grow.',
-    baseCost: { gold: 150, items: { wood: 60, stone: 60 } }, costGrowth: 2.2, buildHours: 36, workersPerLevel: 0,
-  },
-  house: {
-    id: 'house', name: 'Houses', icon: '🏠', maxLevel: 10,
-    description: `Room for ${HOUSING_PER_HOUSE} more villagers per level.`,
-    baseCost: { gold: 20, items: { wood: 25 } }, costGrowth: 1.45, buildHours: 8, workersPerLevel: 0,
-  },
-  farm: {
-    id: 'farm', name: 'Farm', icon: '🌾', maxLevel: 10,
-    description: 'Grows food.', produces: { item: 'food', perLevelPerDay: 4 },
-    baseCost: { gold: 15, items: { wood: 20 } }, costGrowth: 1.45, buildHours: 8, workersPerLevel: 2,
-  },
-  lumber_camp: {
-    id: 'lumber_camp', name: 'Lumber Camp', icon: '🪓', maxLevel: 10,
-    description: 'Fells trees for wood.', produces: { item: 'wood', perLevelPerDay: 4 },
-    baseCost: { gold: 15, items: { wood: 10 } }, costGrowth: 1.45, buildHours: 8, workersPerLevel: 2,
-  },
-  quarry: {
-    id: 'quarry', name: 'Quarry', icon: '🪨', maxLevel: 10,
-    description: 'Cuts stone.', produces: { item: 'stone', perLevelPerDay: 3 },
-    baseCost: { gold: 25, items: { wood: 30 } }, costGrowth: 1.5, buildHours: 12, workersPerLevel: 2,
-  },
-  mine: {
-    id: 'mine', name: 'Iron Mine', icon: '⛏️', maxLevel: 10,
-    description: 'Digs iron ore.', produces: { item: 'iron_ore', perLevelPerDay: 2 },
-    baseCost: { gold: 50, items: { wood: 40, stone: 30 } }, costGrowth: 1.55, buildHours: 16, workersPerLevel: 2,
-  },
-  herb_garden: {
-    id: 'herb_garden', name: 'Herb Garden', icon: '🌿', maxLevel: 10,
-    description: 'Cultivates medicinal herbs.', produces: { item: 'herbs', perLevelPerDay: 2 },
-    baseCost: { gold: 25, items: { wood: 20, stone: 5 } }, costGrowth: 1.45, buildHours: 8, workersPerLevel: 1,
-  },
-  warehouse: {
-    id: 'warehouse', name: 'Warehouse', icon: '📦', maxLevel: 10,
-    description: `Raises storage for every item by ${STORAGE_PER_WAREHOUSE} per level.`,
-    baseCost: { gold: 30, items: { wood: 40, stone: 20 } }, costGrowth: 1.5, buildHours: 12, workersPerLevel: 0,
-  },
-  workshop: {
-    id: 'workshop', name: 'Workshop', icon: '🪚', maxLevel: 5,
-    description: 'Crafts planks, tools and leatherwork.',
-    baseCost: { gold: 30, items: { wood: 40 } }, costGrowth: 1.6, buildHours: 12, workersPerLevel: 1,
-  },
-  smithy: {
-    id: 'smithy', name: 'Smithy', icon: '⚒️', maxLevel: 5,
-    description: 'Smelts iron and forges weapons.',
-    baseCost: { gold: 60, items: { wood: 30, stone: 50 } }, costGrowth: 1.6, buildHours: 16, workersPerLevel: 1,
-  },
-  apothecary: {
-    id: 'apothecary', name: 'Apothecary', icon: '⚗️', maxLevel: 5,
-    description: 'Brews potions from herbs.',
-    baseCost: { gold: 50, items: { wood: 30, stone: 20 } }, costGrowth: 1.6, buildHours: 12, workersPerLevel: 1,
-  },
-  tavern: {
-    id: 'tavern', name: 'Tavern', icon: '🍺', maxLevel: 5,
-    description: 'Draws adventurers. Higher levels attract more of them, more often. Also cooks rations.',
-    baseCost: { gold: 40, items: { wood: 50, stone: 10 } }, costGrowth: 1.7, buildHours: 16, workersPerLevel: 1,
-  },
-  market: {
-    id: 'market', name: 'Market', icon: '⚖️', maxLevel: 5,
-    description: 'Trade goods for gold. Higher levels give better prices.',
-    baseCost: { gold: 60, items: { wood: 40, stone: 20 } }, costGrowth: 1.7, buildHours: 16, workersPerLevel: 1,
-  },
+export const JOBS: Record<JobId, JobDef> = {
+  idle: { id: 'idle', name: 'Resting', icon: '💤', description: 'Rests and recovers faster.' },
+  farmer: { id: 'farmer', name: 'Farmer', icon: '🌾', skill: 'farming', tool: 'sickle',
+    accident: { chance: 0.0003, days: [3, 8], harm: 10, what: 'strained a back' },
+    description: 'Sows fields in spring, weeds in summer, harvests when the grain is ripe.' },
+  herder: { id: 'herder', name: 'Herder', icon: '🐐', skill: 'herding',
+    accident: { chance: 0.0005, days: [3, 10], harm: 15, what: 'was bitten driving off a wolf' },
+    description: 'Guards the goats from wolves, milks them, and cuts leaf fodder in summer and autumn.' },
+  gatherer: { id: 'gatherer', name: 'Gatherer', icon: '🧺', skill: 'gathering',
+    accident: { chance: 0.0004, days: [2, 6], harm: 10, what: 'slipped on the riverbank' },
+    description: 'Fishes and forages. What is found depends on the season.' },
+  woodcutter: { id: 'woodcutter', name: 'Woodcutter', icon: '🪓', skill: 'woodcutting', tool: 'axe',
+    accident: { chance: 0.0015, days: [15, 40], harm: 40, what: 'was struck by a falling tree' },
+    description: 'Fells trees for posts and firewood. Slow without a good axe.' },
+  builder: { id: 'builder', name: 'Builder', icon: '🛖', skill: 'building', tool: 'axe',
+    accident: { chance: 0.001, days: [10, 30], harm: 30, what: 'fell from a roof' },
+    description: 'Clears land, digs clay and raises houses, granaries and pens.' },
+  knapper: { id: 'knapper', name: 'Knapper', icon: '🪨', skill: 'knapping',
+    accident: { chance: 0.003, days: [2, 5], harm: 5, what: 'was cut by a flying flake' },
+    description: 'Shapes flint into sickles, axes, scrapers and arrowheads.' },
+  potter: { id: 'potter', name: 'Potter', icon: '🏺', skill: 'pottery',
+    accident: { chance: 0.0008, days: [3, 8], harm: 10, what: 'was burned at the firing' },
+    description: 'Digs clay, shapes, dries and fires pots.' },
+  hideworker: { id: 'hideworker', name: 'Hide-worker', icon: '🟤', skill: 'hideworking', tool: 'scraper',
+    accident: { chance: 0.0004, days: [3, 10], harm: 15, what: 'fell sick from a rotten hide' },
+    description: 'Scrapes, softens and smokes hides into leather, and sews clothing.' },
+  researcher: { id: 'researcher', name: 'Experimenting', icon: '💡',
+    description: 'Tries new ideas. Costs time and materials, and may take many attempts.' },
 };
 
-export const BUILDING_ORDER = Object.keys(BUILDINGS) as BuildingId[];
+export const JOB_ORDER = Object.keys(JOBS) as JobId[];
 
-/** Reputation needed to raise the town hall to a given level. */
-export const TOWN_HALL_REPUTATION: Record<number, number> = { 2: 10, 3: 30, 4: 60, 5: 100 };
+export const SKILL_NAMES: Record<SkillId, string> = {
+  farming: 'Farming', herding: 'Herding', gathering: 'Gathering', woodcutting: 'Woodcutting', building: 'Building',
+  knapping: 'Knapping', pottery: 'Pottery', hideworking: 'Hide-working', hunting: 'Hunting',
+};
+
+// ---------------------------------------------------------------- farming and herding (real figures)
+
+export const FIELD_HA = 0.5;
+/** Emmer: ~150 kg seed per hectare, ~1,000 kg harvest per hectare in a normal year (ancient yields). */
+export const SEED_KG = 75;
+export const FIELD_YIELD_KG = 500;
+export const SOW_DAYS = 6; // hoeing and sowing half a hectare by hand
+export const WEED_DAYS = 4;
+export const HARVEST_DAYS = 5; // reaping with flint sickles and threshing
+export const GROW_DAYS = 120; // spring-sown emmer ripens in about four months
+/** After ripening, ears shatter and birds take grain: this fraction is lost per day. */
+export const SHATTER_PER_DAY = 0.006;
+
+export const GOAT_MEAT_KG = 14;
+export const GOAT_FODDER_KG = 1.5; // dry fodder per goat per winter day
+export const GOATS_PER_HERDER = 30;
+export const GOATS_PER_PEN = 40;
+/** Litres of milk per goat per day in spring and summer (about half the herd are does in milk). */
+export const MILK_PER_GOAT = 0.35;
+export const MILK_KCAL = 690;
+export const FODDER_PER_HERDER = 35; // kg of leaf fodder cut per day in summer and autumn
+
+// ---------------------------------------------------------------- structures
+
+export interface StructureDef {
+  type: StructureType;
+  name: string;
+  icon: string;
+  w: number;
+  d: number;
+  /** Materials used, and builder-days. Clay is dug on site as part of the work (1 day per 150 kg). */
+  wood: number;
+  straw: number;
+  clay: number;
+  days: number;
+  tech?: TechId;
+  housing?: number;
+  buildable: boolean;
+  description: string;
+}
+
+export const CLAY_PER_DAY = 150;
+/** Clearing a wooded tile: extra builder-days, and the wood it yields. */
+export const CLEAR_DAYS = 4;
+export const CLEAR_WOOD = 250;
+
+export const STRUCTURES: Record<StructureType, StructureDef> = {
+  hall: { type: 'hall', name: "Headman's hall", icon: '🏠', w: 2, d: 3, wood: 0, straw: 0, clay: 0, days: 0, housing: 10,
+    buildable: false, description: 'The largest house, where the village meets. Holds the common stores.' },
+  longhouse: { type: 'longhouse', name: 'Longhouse', icon: '🛖', w: 1, d: 3, wood: 2000, straw: 500, clay: 1500, days: 40,
+    housing: 8, tech: 'wattle_daub', buildable: true,
+    description: 'Timber posts, wattle walls daubed with clay, dung and straw, and a thick thatch. Houses 8.' },
+  field: { type: 'field', name: 'Field', icon: '🌾', w: 2, d: 2, wood: 0, straw: 0, clay: 0, days: 8, tech: 'farming',
+    buildable: true, description: 'Half a hectare of tilled land for emmer wheat.' },
+  granary: { type: 'granary', name: 'Granary', icon: '🏚️', w: 1, d: 1, wood: 500, straw: 120, clay: 200, days: 12,
+    tech: 'wattle_daub', buildable: true,
+    description: 'A storehouse raised on posts to keep out damp and mice. Protects 2,000 kg of grain.' },
+  pen: { type: 'pen', name: 'Goat pen', icon: '🐐', w: 2, d: 2, wood: 700, straw: 0, clay: 0, days: 8, tech: 'herding',
+    buildable: true, description: 'A wattle fold where the goats spend the night safe from wolves. Holds 40.' },
+  smokerack: { type: 'smokerack', name: 'Smoking rack', icon: '🔥', w: 1, d: 1, wood: 150, straw: 0, clay: 0, days: 3,
+    tech: 'hide_smoking', buildable: true,
+    description: 'Smokes up to 25 kg of meat or fish a day, so it keeps for months. Burns wood.' },
+  kiln: { type: 'kiln', name: 'Kiln', icon: '🧱', w: 1, d: 1, wood: 100, straw: 50, clay: 900, days: 10, tech: 'kiln',
+    buildable: true,
+    description: 'A clay updraft kiln: a firebox below a perforated floor. Reaches 900–1,000 °C, hotter and more even than a pit.' },
+};
+
+export const STRUCTURE_ORDER = Object.keys(STRUCTURES) as StructureType[];
+export const GRANARY_KG = 2000;
+export const SMOKE_KG_PER_DAY = 25;
+export const SMOKE_WOOD_PER_KG = 0.5; // a smouldering fire under the rack
+
+// ---------------------------------------------------------------- crafts
 
 export interface RecipeDef {
-  id: string;
-  output: ItemId;
+  id: ItemId;
+  job: JobId;
   qty: number;
-  inputs: Inventory;
-  station: BuildingId;
-  stationLevel: number;
+  inputs: Amounts;
+  days: number;
+  tech?: TechId;
 }
+
 
 export const RECIPES: RecipeDef[] = [
-  { id: 'planks', output: 'planks', qty: 1, inputs: { wood: 2 }, station: 'workshop', stationLevel: 1 },
-  { id: 'tools', output: 'tools', qty: 1, inputs: { iron_ingot: 1, planks: 2 }, station: 'workshop', stationLevel: 2 },
-  { id: 'leather_armor', output: 'leather_armor', qty: 1, inputs: { pelts: 4, planks: 1 }, station: 'workshop', stationLevel: 2 },
-  { id: 'iron_ingot', output: 'iron_ingot', qty: 1, inputs: { iron_ore: 2, wood: 1 }, station: 'smithy', stationLevel: 1 },
-  { id: 'iron_sword', output: 'iron_sword', qty: 1, inputs: { iron_ingot: 3, planks: 1 }, station: 'smithy', stationLevel: 2 },
-  { id: 'healing_potion', output: 'healing_potion', qty: 1, inputs: { herbs: 3 }, station: 'apothecary', stationLevel: 1 },
-  { id: 'rations', output: 'rations', qty: 2, inputs: { food: 5 }, station: 'tavern', stationLevel: 1 },
+  { id: 'sickle', job: 'knapper', qty: 1, inputs: { flint: 0.25, wood: 0.5 }, days: 0.5 },
+  { id: 'axe', job: 'knapper', qty: 1, inputs: { flint: 1.2, wood: 1 }, days: 1 },
+  { id: 'scraper', job: 'knapper', qty: 1, inputs: { flint: 0.1 }, days: 0.15 },
+  { id: 'arrows', job: 'knapper', qty: 1, inputs: { flint: 0.2, wood: 0.5 }, days: 0.6 },
+  { id: 'pot', job: 'potter', qty: 1, inputs: { clay: 5, wood: 4 }, days: 0.8, tech: 'pottery' },
+  { id: 'leather', job: 'hideworker', qty: 1, inputs: { raw_hide: 1 }, days: 3 },
+  { id: 'clothing', job: 'hideworker', qty: 1, inputs: { leather: 2 }, days: 2 },
 ];
 
-export interface LootRange {
-  item: ItemId | 'gold';
-  min: number;
-  max: number;
+export const DEFAULT_TARGETS: Partial<Record<ItemId, number>> = {
+  sickle: 6, axe: 4, scraper: 4, arrows: 10, pot: 20, leather: 2, clothing: 22,
+};
+
+// ---------------------------------------------------------------- knowledge
+
+export interface TechDef {
+  id: TechId;
+  name: string;
+  icon: string;
+  prereqs: TechId[];
+  /** Worker-days of experimenting needed. */
+  cost: number;
+  /** The skill that helps experiments. */
+  skill?: SkillId;
+  /** Materials used per day of experimenting. */
+  uses?: Amounts;
+  /** Buildings needed before experimenting. */
+  needs?: StructureType;
+  effect: string;
+  science: string;
+  /** Beyond this era: shown, but cannot be researched yet. */
+  future?: boolean;
 }
 
-export interface QuestTemplate {
+export const TECHS: Record<TechId, TechDef> = {
+  fire: { id: 'fire', name: 'Fire', icon: '🔥', prereqs: [], cost: 0, effect: 'Warmth, cooking, light.',
+    science: 'Burning wood releases the energy plants stored from sunlight. Cooking breaks down starch and proteins so the body gets more from food.' },
+  knapping: { id: 'knapping', name: 'Flint knapping', icon: '🪨', prereqs: ['fire'], cost: 0, skill: 'knapping',
+    effect: 'Stone tools.',
+    science: 'Flint is almost pure silica with no grain, so a blow sends a cone-shaped fracture through it: knappers control where flakes break off.' },
+  farming: { id: 'farming', name: 'Farming', icon: '🌾', prereqs: [], cost: 0, effect: 'Fields of emmer wheat.',
+    science: 'Emmer keeps its grain in tough husks that do not shatter easily, so it can be harvested. One seed returns six or seven.' },
+  herding: { id: 'herding', name: 'Goat herding', icon: '🐐', prereqs: [], cost: 0, effect: 'Goats for milk, meat and hides.',
+    science: 'Goats eat leaves and scrub people cannot, turning them into milk and meat.' },
+  hunting: { id: 'hunting', name: 'Hunting', icon: '🏹', prereqs: ['knapping'], cost: 0, effect: 'Hunting expeditions.',
+    science: 'Bows store the archer\'s energy in bent wood and release it quickly into the arrow.' },
+  gathering: { id: 'gathering', name: 'Gathering', icon: '🧺', prereqs: [], cost: 0, effect: 'Fish and wild food.',
+    science: 'Knowing which plants are food, medicine or poison, and when each ripens, is knowledge passed down for generations.' },
+  hide_smoking: { id: 'hide_smoking', name: 'Smoking', icon: '💨', prereqs: ['fire'], cost: 0,
+    effect: 'Leather from hides; smoked meat and fish.',
+    science: 'Wood smoke contains phenols and aldehydes that kill microbes and bind hide fibres; drying removes the water rot needs.' },
+  wattle_daub: { id: 'wattle_daub', name: 'Wattle and daub', icon: '🛖', prereqs: [], cost: 0,
+    effect: 'Longhouses and granaries.',
+    science: 'Woven branches give walls strength in tension; clay mixed with straw and dung fills them and dries hard without cracking.' },
+
+  pottery: { id: 'pottery', name: 'Fired pottery', icon: '🏺', prereqs: ['fire', 'wattle_daub'], cost: 45, skill: 'building',
+    uses: { clay: 4, wood: 6 }, effect: 'Potters can make pots in a pit firing (about 700–800 °C).',
+    science: 'Above about 600 °C the water locked inside clay minerals is driven off and they fuse: the change cannot be undone, so the clay can no longer dissolve.' },
+  tempering: { id: 'tempering', name: 'Tempered clay', icon: '🧂', prereqs: ['pottery'], cost: 30, skill: 'pottery',
+    uses: { clay: 4, wood: 4 }, effect: 'Far fewer pots crack in firing.',
+    science: 'Grit, sand or crushed shell mixed into the clay lets steam escape and stops cracks from running when the pot heats and cools.' },
+  kiln: { id: 'kiln', name: 'Updraft kiln', icon: '🧱', prereqs: ['tempering'], cost: 50, skill: 'pottery',
+    uses: { clay: 10, wood: 10 }, effect: 'Kilns can be built: hotter, even firing, stronger pots, less fuel and breakage.',
+    science: 'Enclosing the fire and drawing air up through it reaches 900–1,000 °C and keeps heat even. Kilns are the furnaces later used to smelt copper.' },
+  heat_treated_flint: { id: 'heat_treated_flint', name: 'Heat-treated flint', icon: '♨️', prereqs: ['knapping', 'fire'], cost: 35,
+    skill: 'knapping', uses: { flint: 0.5, wood: 3 }, effect: 'Knappers bake flint slowly in sand before working it: better tools from poorer stone.',
+    science: 'Heating flint slowly to about 250–350 °C changes its micro-crystals so it fractures more smoothly. Too fast and it shatters.' },
+  polished_axe: { id: 'polished_axe', name: 'Polished axe', icon: '🪓', prereqs: ['knapping'], cost: 40, skill: 'knapping',
+    uses: { flint: 1 }, effect: 'Axes are ground smooth on sandstone: they last three times longer and cut faster.',
+    science: 'A ground edge has no flake scars for cracks to start from, so it chips far less when it hits wood.' },
+  manuring: { id: 'manuring', name: 'Manuring', icon: '💩', prereqs: ['farming', 'herding'], cost: 40, skill: 'farming',
+    needs: 'pen', effect: 'Dung from the pen is spread on the fields: fertility recovers every year.',
+    science: 'Dung returns nitrogen, phosphorus and potassium that each harvest takes out of the soil.' },
+  cheese: { id: 'cheese', name: 'Cheese making', icon: '🧀', prereqs: ['herding', 'pottery'], cost: 35, skill: 'herding',
+    uses: { wood: 2 }, effect: 'Milk becomes cheese that keeps for months and that adults can digest.',
+    science: 'Most adults cannot digest lactose. Souring and straining milk through perforated pots removes most of it with the whey.' },
+  copper: { id: 'copper', name: 'Copper smelting', icon: '🟢', prereqs: ['kiln'], cost: 999, future: true,
+    effect: 'The next era.',
+    science: 'Green and blue stones (malachite, azurite) are copper ores. Heated above 1,085 °C with charcoal, which takes their oxygen away, they give up metal.' },
+};
+
+export const TECH_ORDER = Object.keys(TECHS) as TechId[];
+export const START_KNOWN: TechId[] = ['fire', 'knapping', 'farming', 'herding', 'hunting', 'gathering', 'hide_smoking', 'wattle_daub'];
+
+// ---------------------------------------------------------------- pottery
+
+/** Chance a pot cracks in firing. */
+export const BREAKAGE = { pit: 0.35, tempered: 0.15, kiln: 0.06 };
+
+// ---------------------------------------------------------------- hunting
+
+export interface PreyDef {
   id: string;
   name: string;
   icon: string;
-  description: string;
-  /** Party power at which success is a coin flip. */
-  difficulty: number;
   days: number;
-  minReputation: number;
-  maxParty: number;
-  reputation: number;
-  loot: LootRange[];
-}
-
-export const QUESTS: QuestTemplate[] = [
-  {
-    id: 'cellar_rats', name: 'Rats in the Cellar', icon: '🐀', difficulty: 2, days: 1, minReputation: 0, maxParty: 1, reputation: 1,
-    description: 'Giant rats are gnawing through the grain stores.',
-    loot: [{ item: 'gold', min: 8, max: 16 }, { item: 'food', min: 5, max: 12 }],
-  },
-  {
-    id: 'wolf_den', name: 'The Wolf Den', icon: '🐺', difficulty: 8, days: 2, minReputation: 0, maxParty: 2, reputation: 2,
-    description: 'Wolves prowl near the farms. Thin the pack and bring back their pelts.',
-    loot: [{ item: 'gold', min: 12, max: 25 }, { item: 'pelts', min: 4, max: 8 }],
-  },
-  {
-    id: 'herb_expedition', name: 'Moonleaf Expedition', icon: '🌙', difficulty: 6, days: 2, minReputation: 0, maxParty: 2, reputation: 2,
-    description: 'Escort the herbalist into the Thornwood to gather rare herbs.',
-    loot: [{ item: 'gold', min: 5, max: 15 }, { item: 'herbs', min: 8, max: 16 }],
-  },
-  {
-    id: 'bandit_camp', name: 'Bandit Camp', icon: '🏴', difficulty: 15, days: 3, minReputation: 5, maxParty: 3, reputation: 4,
-    description: 'Bandits are raiding travellers on the north road.',
-    loot: [{ item: 'gold', min: 40, max: 80 }, { item: 'iron_ingot', min: 1, max: 3 }],
-  },
-  {
-    id: 'abandoned_mine', name: 'The Abandoned Mine', icon: '🕳️', difficulty: 20, days: 3, minReputation: 10, maxParty: 3, reputation: 4,
-    description: 'Something stirs in the old dwarven mine. Clear it out and haul what ore remains.',
-    loot: [{ item: 'iron_ore', min: 15, max: 30 }, { item: 'stone', min: 10, max: 25 }, { item: 'gold', min: 10, max: 30 }],
-  },
-  {
-    id: 'troll_bridge', name: 'Troll Under the Bridge', icon: '🧌', difficulty: 32, days: 4, minReputation: 20, maxParty: 3, reputation: 6,
-    description: 'A troll demands tolls from every merchant crossing the river.',
-    loot: [{ item: 'gold', min: 60, max: 120 }, { item: 'monster_parts', min: 2, max: 5 }],
-  },
-  {
-    id: 'haunted_ruins', name: 'The Haunted Ruins', icon: '👻', difficulty: 48, days: 5, minReputation: 35, maxParty: 4, reputation: 8,
-    description: 'Restless spirits guard the ruins of an old temple, and its treasures.',
-    loot: [{ item: 'gold', min: 100, max: 200 }, { item: 'relic', min: 1, max: 2 }],
-  },
-  {
-    id: 'dragon_lair', name: 'The Dragon of Ashpeak', icon: '🐉', difficulty: 95, days: 8, minReputation: 70, maxParty: 4, reputation: 20,
-    description: 'A dragon has woken in the mountains. Slay it and the realm will know your village\'s name.',
-    loot: [{ item: 'gold', min: 400, max: 800 }, { item: 'relic', min: 3, max: 5 }, { item: 'monster_parts', min: 5, max: 10 }],
-  },
-];
-
-export interface ClassDef {
-  id: AdventurerClass;
-  name: string;
-  icon: string;
-  powerPerLevel: number;
-  perk: string;
-}
-
-export const CLASSES: Record<AdventurerClass, ClassDef> = {
-  warrior: { id: 'warrior', name: 'Warrior', icon: '🛡️', powerPerLevel: 4, perk: 'Gains double power from swords and armor.' },
-  rogue: { id: 'rogue', name: 'Rogue', icon: '🗝️', powerPerLevel: 3, perk: '+25% gold from quests.' },
-  mage: { id: 'mage', name: 'Mage', icon: '🔮', powerPerLevel: 5, perk: 'Powerful but frail: higher injury risk.' },
-  ranger: { id: 'ranger', name: 'Ranger', icon: '🏹', powerPerLevel: 3, perk: 'Finds the quick path: quests take one day less.' },
-  cleric: { id: 'cleric', name: 'Cleric', icon: '✨', powerPerLevel: 3, perk: 'Heals the party: halves injury and death risk.' },
-};
-
-export const FIRST_NAMES = [
-  'Aldric', 'Brienne', 'Corwin', 'Dara', 'Elowen', 'Fenris', 'Gwyn', 'Halvard', 'Isolde', 'Jory', 'Kael', 'Lyra',
-  'Merrick', 'Nessa', 'Orrin', 'Perrin', 'Quill', 'Rowan', 'Sable', 'Thane', 'Ulric', 'Vesna', 'Wren', 'Yara', 'Zephyr',
-];
-export const EPITHETS = [
-  'the Bold', 'Ironhand', 'of the Vale', 'Swiftfoot', 'the Grey', 'Stormborn', 'Oakenshield', 'the Quiet', 'Ashwalker',
-  'Brightblade', 'the Wanderer', 'Duskbane', 'Thornheart', 'the Lucky', 'Ravenwood',
-];
-
-export type SeasonId = 'spring' | 'summer' | 'autumn' | 'winter';
-
-export interface SeasonDef {
-  id: SeasonId;
-  name: string;
-  icon: string;
-  /** Multipliers on daily production by item. Items not listed produce normally. */
-  production: Partial<Record<ItemId, number>>;
-  /** Wood burned per villager per day to keep warm. */
-  firewood: number;
+  minHunters: number;
+  /** Party strength (hunting skill) at which success is a coin flip. */
+  difficulty: number;
+  meat: number;
+  hides: number;
+  antler: number;
+  injury: number;
+  death: number;
   description: string;
 }
 
-export const DAYS_PER_SEASON = 6;
-
-export const SEASONS: SeasonDef[] = [
-  { id: 'spring', name: 'Spring', icon: '🌱', production: { herbs: 1.25 }, firewood: 0,
-    description: 'Herbs flourish (+25%).' },
-  { id: 'summer', name: 'Summer', icon: '☀️', production: { food: 1.25 }, firewood: 0,
-    description: 'Long days: farms yield +25%.' },
-  { id: 'autumn', name: 'Autumn', icon: '🍂', production: { food: 1.1, herbs: 0.75 }, firewood: 0,
-    description: 'Harvest time: farms +10%, herbs -25%. Stock up for winter.' },
-  { id: 'winter', name: 'Winter', icon: '❄️', production: { food: 0.35, herbs: 0.25 }, firewood: 0.4,
-    description: 'Fields freeze: farms 35%, herbs 25%. Each villager burns 0.4 wood a day.' },
+export const PREY: PreyDef[] = [
+  { id: 'deer', name: 'Red deer', icon: '🦌', days: 3, minHunters: 2, difficulty: 60, meat: 55, hides: 1, antler: 1,
+    injury: 0.01, death: 0, description: 'Shy forest deer. Around 55 kg of meat, a hide and antler.' },
+  { id: 'boar', name: 'Wild boar', icon: '🐗', days: 3, minHunters: 2, difficulty: 80, meat: 45, hides: 1, antler: 0,
+    injury: 0.06, death: 0.006, description: 'Fat in autumn, and dangerous when wounded.' },
+  { id: 'aurochs', name: 'Aurochs', icon: '🐂', days: 5, minHunters: 4, difficulty: 200, meat: 300, hides: 2, antler: 0,
+    injury: 0.12, death: 0.02, description: 'Wild cattle, taller than a man at the shoulder. Huge reward, real danger.' },
 ];
+
+/** Hunting is best in autumn and worst in spring, when animals are lean and rearing young. */
+export const HUNT_SEASON: Record<SeasonId, number> = { spring: 0.7, summer: 0.9, autumn: 1.2, winter: 1 };
+
+// ---------------------------------------------------------------- neighbours
+
+export interface NeighborDef {
+  id: string;
+  name: string;
+  /** Days of travel each way. */
+  days: number;
+  /** Which edge of the map the path leaves by. */
+  dir: 'west' | 'south' | 'north';
+  description: string;
+  /** What they produce well (kept in stock) and what they lack (value highly). */
+  makes: Amounts;
+  lacks: ItemId[];
+  knows: TechId[];
+  /** Quality of their goods. */
+  quality: Partial<Record<ItemId, number>>;
+  flintSource?: boolean;
+}
+
+export const NEIGHBORS: NeighborDef[] = [
+  { id: 'chalk', name: 'The Chalk Hill folk', days: 1, dir: 'west',
+    description: 'Herders on the chalk downs a day\'s walk west. They dig fine flint from deep shafts.',
+    makes: { flint: 60, raw_hide: 6, axe: 4 }, lacks: ['grain', 'pot', 'cheese', 'nuts'],
+    knows: ['heat_treated_flint', 'polished_axe'], quality: { flint: 0.9, axe: 0.8 }, flintSource: true },
+  { id: 'reed', name: 'The Reed people', days: 2, dir: 'south',
+    description: 'Fishers and potters two days downstream, where the river widens into marsh.',
+    makes: { pot: 12, smoked_meat: 40, nuts: 30 }, lacks: ['flint', 'axe', 'leather', 'clothing', 'sickle'],
+    knows: ['pottery', 'tempering'], quality: { pot: 0.6 } },
+];
+
+/** Gathering flint yourself on the Chalk Hill folk's land: kg per person, and its quality. */
+export const FLINT_TRIP_KG = 20;
+export const FLINT_TRIP_Q = 0.8;
+export const RIVER_FLINT_Q = 0.45;

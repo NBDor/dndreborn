@@ -1,7 +1,7 @@
 // Isometric drawing primitives on top of Pixi Graphics.
 // Everything is drawn twice-aware: `g` is the body (tinted at night), `lights` holds what glows.
 import type { Graphics } from 'pixi.js';
-import type { SeasonId } from '../../game/data';
+import type { SeasonId } from '../../game/types';
 import { iso, shade, type Pt } from './iso';
 
 export const STROKE = { width: 0.6, color: '#190f05', alpha: 0.4, join: 'round' as const };

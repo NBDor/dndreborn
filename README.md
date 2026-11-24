@@ -1,77 +1,62 @@
 # Hearthstead
 
-A browser-based village management game. You are the steward of a small settlement: grow it, keep its people
-fed, manage its resources and expenses, craft goods, and post quests for the adventurers who pass through.
+A village simulation grounded in real-world logic. You guide a band of settlers founding the first village in a
+river valley of an invented world: humans only, no magic, and technology that grows step by step from real
+prerequisites. See [`docs/design.md`](docs/design.md) for the design rules.
+
+This is the **era 1 proof of concept: First Villages** (a Neolithic-level technology).
 
 ## Running
 
 ```bash
 npm install
 npm run dev      # start the dev server
-npm test         # engine unit tests
+npm test         # engine, map and balance tests
 npm run build    # typecheck + production build into dist/
 ```
 
-Progress is saved automatically to the browser's local storage. Use **↺ New** to start over.
-
-## The village map
-
-The Village tab shows the settlement as a 2.5D isometric island, rendered with **PixiJS**.
-
-- **Build anywhere.** New buildings, and each new cottage, are placed by you: pick *Choose a spot*, move the
-  ghost over the island (green fits, red says why not) and click. Buildings cannot sit on the roads or on each
-  other; trees are cleared where you build. Upgrades happen in place, under scaffolding.
-- **Living village.** Villagers stroll the roads, smoke rises from chimneys, the town hall flag waves.
-- **Adventurers on the move.** Newcomers walk in to the tavern and wait outside it. A party you send on a quest
-  walks down the road and off the edge of the island, and walks back when the quest ends. Injured adventurers wear
-  a bandage; those who leave walk away.
-- **Seasons.** Spring blossoms and petals, summer fields, autumn leaves and golden crops, winter snow on the
-  ground, roofs and trees with falling snowflakes.
-- **Day and night.** Night tints the world blue; windows, lanterns and the forge glow.
-- **Controls.** Drag to pan, scroll or use the buttons to zoom, click a building to manage it. Right-click or Esc
-  cancels placement. A list view is still available.
-
-The art is procedural: buildings are drawn from isometric primitives in `src/ui/map/buildings.ts` and
-`src/ui/map/draw.ts`, so there are no image files. Each building is one function drawn relative to its own plot,
-so painted sprites can replace them one at a time.
+Progress is saved automatically in the browser. Use **↺ New** to start over. Saves from earlier prototypes are
+not carried over.
 
 ## How it plays
 
-- **Time.** One in-game hour passes every half second at 1× speed (pause, 1×, 2× or 4×). Production, food and
-  gold accrue continuously. Population, arrivals and random events happen at the start of each day.
-- **Seasons.** Each season lasts 6 days. Spring: herbs +25%. Summer: farms +25%. Autumn: farms +10%, herbs -25%.
-  Winter: farms 35%, herbs 25%, and every villager burns 0.4 wood a day; if the woodpiles run dry, families leave.
-- **Villagers.** They pay taxes and eat food. A new family arrives each day while there is spare housing and
-  food. If food runs out, families leave.
-- **Workforce.** Production buildings need workers. If jobs outnumber villagers, every building produces less.
-- **Expenses.** Each building level (except houses) costs gold upkeep per day.
-- **Buildings.** One construction at a time. The Town Hall caps every other building's level, and raising it
-  needs reputation. Higher tiers need planks and then tools.
-- **Crafting.** The Workshop, Smithy, Apothecary and Tavern turn raw resources into materials, quest supplies
-  (rations, potions) and gear (swords, armor).
-- **Adventurers.** They show up at the tavern, stay a few days and work for a fee. Five classes, each with a perk.
-  They level up from successful quests and charge more as they do.
-- **Quests.** Choose a quest from the board, pick a party and attach supplies. Success depends on party power
-  against quest difficulty. Success brings loot and reputation; failure can injure or kill adventurers and
-  lose gear. Reputation unlocks harder quests and Town Hall upgrades.
-- **Market.** Buy and sell any item once you have a Market. Higher levels give better prices.
+- **Time.** One day passes per second at 1× (pause, 1×, 2×, 5×). A season is 91 days, a year 364.
+- **People.** Sixteen named settlers with ages, health and skills. Assign each a job; skills grow by practice and
+  fastest beside someone more skilled. Children help from seven and work fully from twelve. When the last expert
+  in a craft dies untaught, the knowledge is largely lost.
+- **Food.** Everyone needs real calories (about 2,400 kcal a day for a working adult). Emmer wheat is sown in
+  spring (75 kg of seed per half-hectare field), weeded in summer, ripens after about four months and must be
+  harvested before it shatters. Seed grain is kept back from eating. Gatherers fish and forage by season
+  (hazelnuts in autumn are a mainstay). Goats give milk (only children can digest it until cheese is discovered),
+  meat and hides. Fresh food spoils in days; smoking racks and granaries preserve it.
+- **Winter.** Fields freeze, goats need dried fodder, every house burns firewood and everyone needs warm
+  clothing, which wears out in about a year.
+- **Building.** Place longhouses, fields, granaries, pens and smoking racks anywhere on dry land. Building on
+  forest takes longer but the felled trees give wood. Clay for daub is dug on site.
+- **Crafts.** Set how many tools and goods to keep; knappers, potters and hide-workers work toward those targets.
+  Tool quality follows the flint and the worker's skill; tools wear out with use.
+- **Journeys.** Hunt deer, boar or aurochs (real danger); dig flint on the Chalk Hill folk's land (they will not
+  like it); trade by barter with two neighbouring peoples, limited to what your people can carry (25 kg each).
+  Neighbours value what they lack, remember debts, and teach by example.
+- **Knowledge.** Discover fired pottery, tempered clay, the updraft kiln, heat-treated flint, the polished axe,
+  manuring and cheese by experimenting, each with its real prerequisites and the science behind it. Copper
+  smelting is shown as the next era.
+- **Advisor.** The bar under the resources warns about what will go wrong soon: food, seed, firewood, clothing,
+  fodder, wolves, and knowledge held by a single ageing person.
 
 ## Code layout
 
 ```
-src/game/   pure game logic, no React
-  types.ts    state and action types
-  data.ts     content: items, buildings, recipes, quests, classes, seasons
-  map.ts      grid, roads, building footprints, starting layout
-  rules.ts    derived values and validation (shared by engine and UI)
-  engine.ts   reducer (state, action) -> state, tick simulation, save/load
-  rng.ts      seeded RNG; the seed lives in state, so runs are reproducible
-src/ui/     React panels (village, crafting, tavern & quests, market, chronicle)
-  map/        PixiJS village map
-    scene.ts    the scene: state diffing, people, walkers, particles, input, placement
-    buildings.ts, draw.ts   procedural isometric art
-    VillageMap.tsx          React host for the scene
-src/App.tsx game loop, speed controls, autosave
+docs/design.md    design rules: grounded world, eras, technology, trade
+src/game/         pure, deterministic engine (no React)
+  types.ts          state and action types
+  data.ts           content with real figures: items, jobs, structures, technologies, prey, neighbours
+  map.ts            the river valley: grid, river, forest, starting layout
+  rules.ts          derived values, validation and advisor warnings (shared by engine and UI)
+  sim.ts            one day of village life: work, food, warmth, spoilage, journeys, birth and death
+  engine.ts         reducer (state, action) -> state, founding village, save/load
+  store.ts, rng.ts  inventory helpers and a seeded RNG
+src/ui/           React panels: village, people, stores & crafts, journeys, knowledge, chronicle
+  map/              PixiJS isometric village map
+src/App.tsx       game loop, speed controls, autosave
 ```
-
-Adding content is mostly data: new items, buildings, recipes or quests go in `src/game/data.ts`.

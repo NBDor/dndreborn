@@ -1,388 +1,157 @@
-// The game reducer. Pure: (state, action) -> new state. Randomness comes from state.seed.
-import { BUILDINGS, CLASSES, DAYS_PER_SEASON, EPITHETS, FIRST_NAMES, ITEMS, RECIPES, TICKS_PER_DAY } from './data';
-import { DEFAULT_HOUSE_SPOTS, DEFAULT_SPOTS } from './map';
+// The game reducer: (state, action) -> new state. Pure: randomness comes from state.seed.
+import {
+  DAYS_PER_YEAR, DEFAULT_TARGETS, GOAT_MEAT_KG, HELPER_AGE, NEIGHBORS, START_KNOWN, STRUCTURES,
+} from './data';
+import { START_LAYOUT, plotAt, plotTiles, tileKey } from './map';
 import { Rng } from './rng';
 import {
-  buildBlocker, buildCost, buildHours, buyPrice, day, findFreeSpot, firewoodPerDay, foodUsePerDay, housingCap,
-  needsPlacement, placementBlocker, productionPerDay, qty, questBlocker, questDays, questTemplate, recipeBlocker,
-  season, sellPrice, storageCap, successChance, taxesPerDay, upkeepPerDay, xpToNext,
+  age, buildBlocker, buildPlan, expeditionBlocker, expeditionDays, placementBlocker, techStatus,
 } from './rules';
-import type { Action, Adventurer, AdventurerClass, GameState, Inventory, ItemId, LogKind } from './types';
+import { checkDiscoveries, simulateDay } from './sim';
+import { add, log, newId, take } from './store';
+import type { Action, GameState, ItemId, Person, SkillId, Structure } from './types';
 
-export const SAVE_VERSION = 2;
-const MAX_LOG = 120;
+export const SAVE_VERSION = 3;
+
+type Founder = [name: string, sex: 'f' | 'm', age: number, skills: Partial<Record<SkillId, number>>, job: Person['job']];
+
+/** The founding families. Hesk is the only master knapper: if she dies untaught, the craft suffers. */
+const FOUNDERS: Founder[] = [
+  ['Hesk', 'f', 55, { knapping: 78, gathering: 50, hideworking: 30 }, 'knapper'],
+  ['Ostav', 'm', 52, { herding: 65, hunting: 40, farming: 30 }, 'herder'],
+  ['Aru', 'f', 34, { farming: 62, building: 30, gathering: 25 }, 'farmer'],
+  ['Doran', 'm', 36, { building: 55, woodcutting: 45, hunting: 30 }, 'builder'],
+  ['Teska', 'f', 29, { gathering: 55, hideworking: 50, pottery: 5 }, 'gatherer'],
+  ['Maro', 'm', 31, { hunting: 60, woodcutting: 35, knapping: 20 }, 'woodcutter'],
+  ['Bena', 'f', 25, { farming: 40, herding: 30, gathering: 30 }, 'farmer'],
+  ['Vann', 'm', 23, { woodcutting: 40, building: 35, hunting: 20 }, 'builder'],
+  ['Kessa', 'f', 20, { hideworking: 30, gathering: 35, farming: 20 }, 'gatherer'],
+  ['Esk', 'm', 18, { hunting: 30, farming: 25, building: 15 }, 'farmer'],
+  ['Ilo', 'f', 11, { gathering: 10 }, 'gatherer'],
+  ['Tobek', 'm', 9, { herding: 5 }, 'herder'],
+  ['Mira', 'f', 6, {}, 'idle'],
+  ['Joss', 'm', 4, {}, 'idle'],
+  ['Neve', 'f', 2, {}, 'idle'],
+  ['Kel', 'm', 0.5, {}, 'idle'],
+];
 
 export function createInitialState(seed = Date.now() % 2147483647): GameState {
   const s: GameState = {
     version: SAVE_VERSION,
-    tick: 8, // start in the morning
+    day: 0,
     seed,
-    gold: 120,
-    reputation: 0,
-    population: 5,
-    inventory: { food: 40, wood: 60, stone: 30 },
-    buildings: {
-      town_hall: 1, house: 1, farm: 1, lumber_camp: 1, quarry: 0, mine: 0, herb_garden: 0, warehouse: 0,
-      workshop: 0, smithy: 0, apothecary: 0, tavern: 1, market: 0,
-    },
-    placements: {
-      town_hall: DEFAULT_SPOTS.town_hall, farm: DEFAULT_SPOTS.farm, lumber_camp: DEFAULT_SPOTS.lumber_camp,
-      tavern: DEFAULT_SPOTS.tavern,
-    },
-    houses: [DEFAULT_HOUSE_SPOTS[0]],
-    construction: null,
-    adventurers: [],
-    quests: [],
+    people: [],
+    inventory: {},
+    goats: 14,
+    structures: [],
+    cleared: [],
+    expeditions: [],
+    neighbors: NEIGHBORS.map((n) => ({ id: n.id, name: n.name, trust: n.id === 'chalk' ? 10 : 0, stock: { ...n.makes }, owes: 0, famine: false })),
+    known: [...START_KNOWN],
+    research: {},
+    targets: { ...DEFAULT_TARGETS },
+    weather: 'normal',
+    report: { kcalNeeded: 0, kcalEaten: 0, hungry: 0, cold: 0, spoiled: {} },
     log: [],
     nextId: 1,
-    starving: false,
-    freezing: false,
   };
-  const rng = new Rng(seed);
-  const first = spawnAdventurer(s, rng);
-  first.level = 1;
-  first.fee = 6;
-  s.adventurers.push(first);
-  s.seed = rng.seed;
-  log(s, 'info', 'You have been named steward of a small settlement. Build it into a great village.');
-  log(s, 'info', `${first.name} the ${CLASSES[first.cls].name} sits by the tavern fire, looking for work.`);
-  return s;
-}
-
-function log(s: GameState, kind: LogKind, text: string) {
-  s.log.unshift({ id: s.nextId++, day: day(s), kind, text });
-  if (s.log.length > MAX_LOG) s.log.length = MAX_LOG;
-}
-
-function addItem(s: GameState, item: ItemId, n: number): number {
-  const cap = storageCap(s);
-  const before = qty(s, item);
-  const after = Math.max(0, Math.min(cap, before + n));
-  s.inventory[item] = after;
-  return after - before;
-}
-
-function removeItems(s: GameState, items: Inventory, times = 1) {
-  for (const [item, n] of Object.entries(items) as [ItemId, number][]) {
-    s.inventory[item] = qty(s, item) - n * times;
+  for (const [name, sex, years, skills, job] of FOUNDERS) {
+    s.people.push({ id: newId(s, 'p'), name, sex, born: -Math.round(years * DAYS_PER_YEAR), health: 90, skills: { ...skills }, job });
   }
-}
-
-function spawnAdventurer(s: GameState, rng: Rng): Adventurer {
-  const cls = rng.pick(Object.keys(CLASSES) as AdventurerClass[]);
-  const level = Math.max(1, Math.min(12, 1 + Math.floor(s.reputation / 12) + rng.int(-1, 1)));
-  return {
-    id: `adv${s.nextId++}`,
-    name: `${rng.pick(FIRST_NAMES)} ${rng.pick(EPITHETS)}`,
-    cls,
-    level,
-    xp: 0,
-    fee: level * 6 + rng.int(0, 6),
-    leavesOnDay: day(s) + rng.int(3, 6),
-    status: 'idle',
-    questsCompleted: 0,
-  };
+  for (const { type, at } of START_LAYOUT) {
+    const x: Structure = { id: newId(s, 's'), type, at, built: true, work: 0, workNeeded: 0, clearedWood: 0 };
+    if (type === 'field') x.field = { sownOn: null, sowWork: 0, weeding: 0, harvestWork: 0, fertility: 1.05 };
+    s.structures.push(x);
+    for (const t of plotTiles(plotAt(type, at))) s.cleared.push(tileKey(t));
+  }
+  const start: [ItemId, number, number][] = [
+    ['grain', 1400, 0.7], ['straw', 400, 0.6], ['wood', 900, 0.6], ['flint', 8, 0.45], ['nuts', 30, 0.7],
+    ['smoked_meat', 80, 0.7], ['fodder', 200, 0.6], ['sickle', 4, 0.55], ['axe', 3, 0.55], ['scraper', 3, 0.5],
+    ['arrows', 8, 0.5], ['clothing', 16, 0.5], ['leather', 2, 0.5],
+  ];
+  for (const [item, n, q] of start) add(s, item, n, q);
+  log(s, 'info', 'Sixteen people have come to settle this river valley, with seed grain, goats and what they could carry.');
+  log(s, 'info', 'It is early spring: clear fields and sow before summer, or there will be nothing to harvest.');
+  return s;
 }
 
 export function reduce(prev: GameState, action: Action): GameState {
   const s: GameState = structuredClone(prev);
   const rng = new Rng(s.seed);
-  const changed = apply(s, action, rng);
-  if (!changed) return prev;
+  if (!apply(s, action, rng)) return prev;
   s.seed = rng.seed;
   return s;
 }
 
-/** Mutates the cloned state. Returns false if the action was invalid. */
-function apply(s: GameState, action: Action, rng: Rng): boolean {
-  switch (action.type) {
+function apply(s: GameState, a: Action, rng: Rng): boolean {
+  switch (a.type) {
     case 'tick':
-      tick(s, rng);
+      simulateDay(s, rng);
       return true;
 
+    case 'assign': {
+      const p = s.people.find((x) => x.id === a.personId);
+      if (!p || p.away || age(p, s.day) < HELPER_AGE) return false;
+      if (a.job === 'researcher' && (!a.research || techStatus(s, a.research) !== 'available')) return false;
+      p.job = a.job;
+      p.research = a.job === 'researcher' ? a.research : undefined;
+      return true;
+    }
+
     case 'build': {
-      if (buildBlocker(s, action.building)) return false;
-      const place = needsPlacement(s, action.building);
-      if (place && (!action.at || placementBlocker(s, action.building, action.at))) return false;
-      const target = s.buildings[action.building] + 1;
-      const cost = buildCost(action.building, target);
-      s.gold -= cost.gold;
-      removeItems(s, cost.items);
-      s.construction = { building: action.building, targetLevel: target, endsTick: s.tick + buildHours(action.building, target) };
-      if (place && action.at) s.construction.at = { x: action.at.x, y: action.at.y };
-      const def = BUILDINGS[action.building];
-      log(s, 'info', target === 1 ? `Construction of the ${def.name} has begun.` : `Upgrading ${def.name} to level ${target}.`);
+      if (buildBlocker(s, a.structure) || placementBlocker(s, a.structure, a.at)) return false;
+      const plan = buildPlan(s, a.structure, a.at);
+      take(s, 'wood', plan.wood);
+      take(s, 'straw', plan.straw);
+      s.structures.push({
+        id: newId(s, 's'), type: a.structure, at: { x: a.at.x, y: a.at.y }, built: false, work: 0,
+        workNeeded: plan.days, clearedWood: plan.clearedWood,
+      });
+      log(s, 'info', `Work begins on a ${STRUCTURES[a.structure].name.toLowerCase()} (${Math.round(plan.days)} builder-days${plan.trees ? `, ${plan.trees} wooded tiles to clear` : ''}).`);
       return true;
     }
 
     case 'cancelBuild': {
-      const c = s.construction;
-      if (!c) return false;
-      const cost = buildCost(c.building, c.targetLevel);
-      s.gold += Math.floor(cost.gold / 2);
-      for (const [item, n] of Object.entries(cost.items) as [ItemId, number][]) addItem(s, item, Math.floor(n / 2));
-      s.construction = null;
-      log(s, 'bad', `Construction of the ${BUILDINGS[c.building].name} was abandoned. Half the materials were salvaged.`);
+      const x = s.structures.find((v) => v.id === a.structureId);
+      if (!x || x.built) return false;
+      const def = STRUCTURES[x.type];
+      add(s, 'wood', def.wood / 2, 0.6);
+      add(s, 'straw', def.straw / 2, 0.6);
+      s.structures = s.structures.filter((v) => v !== x);
+      log(s, 'info', `Work on the ${def.name.toLowerCase()} was abandoned; half the materials were saved.`);
       return true;
     }
 
-    case 'craft': {
-      const recipe = RECIPES.find((r) => r.id === action.recipeId);
-      const times = Math.max(1, Math.floor(action.times ?? 1));
-      if (!recipe || recipeBlocker(s, recipe, times)) return false;
-      removeItems(s, recipe.inputs, times);
-      addItem(s, recipe.output, recipe.qty * times);
+    case 'setTarget':
+      if (a.qty < 0) return false;
+      s.targets[a.item] = Math.floor(a.qty);
+      return true;
+
+    case 'slaughter': {
+      const n = Math.floor(a.count);
+      if (n < 1 || n > s.goats) return false;
+      s.goats -= n;
+      add(s, 'meat', n * GOAT_MEAT_KG, 0.7);
+      add(s, 'raw_hide', n, 0.6);
+      log(s, 'info', `${n} goat${n > 1 ? 's were' : ' was'} slaughtered: ${n * GOAT_MEAT_KG} kg of meat and ${n} hide${n > 1 ? 's' : ''}.`);
       return true;
     }
 
-    case 'buy': {
-      const n = Math.floor(action.qty);
-      const price = buyPrice(s, action.item) * n;
-      if (s.buildings.market < 1 || n < 1 || s.gold < price) return false;
-      if (qty(s, action.item) + n > storageCap(s)) return false;
-      s.gold -= price;
-      addItem(s, action.item, n);
-      return true;
-    }
-
-    case 'sell': {
-      const n = Math.floor(action.qty);
-      if (s.buildings.market < 1 || n < 1 || qty(s, action.item) < n) return false;
-      s.inventory[action.item] = qty(s, action.item) - n;
-      s.gold += sellPrice(s, action.item) * n;
-      return true;
-    }
-
-    case 'startQuest': {
-      const q = questTemplate(action.templateId);
-      if (!q) return false;
-      const ids = [...new Set(action.partyIds)];
-      const party = ids.map((id) => s.adventurers.find((a) => a.id === id)).filter((a): a is Adventurer => !!a);
-      if (party.length !== ids.length) return false;
-      const supplies = cleanInventory(action.supplies);
-      if (questBlocker(s, q, party, supplies)) return false;
-      const fee = party.reduce((sum, a) => sum + a.fee, 0);
-      s.gold -= fee;
-      removeItems(s, supplies);
-      for (const a of party) a.status = 'questing';
-      s.quests.push({
-        id: `q${s.nextId++}`,
-        templateId: q.id,
-        partyIds: ids,
-        supplies,
-        startedTick: s.tick,
-        endsTick: s.tick + questDays(q, party) * TICKS_PER_DAY,
-        successChance: successChance(q, party, supplies),
+    case 'expedition': {
+      const cargo = a.cargo ?? {};
+      if (expeditionBlocker(s, a.kind, a.target, a.members, cargo)) return false;
+      if (a.kind === 'hunt') take(s, 'arrows', a.members.length);
+      for (const [item, n] of Object.entries(cargo) as [ItemId, number][]) take(s, item, n);
+      const id = newId(s, 'e');
+      for (const pid of a.members) s.people.find((p) => p.id === pid)!.away = id;
+      s.expeditions.push({
+        id, kind: a.kind, target: a.target, members: [...a.members], departed: s.day,
+        returns: s.day + expeditionDays(a.kind, a.target), cargo: { ...cargo }, wants: [...(a.wants ?? [])],
       });
-      log(s, 'quest', `${party.map((a) => a.name).join(', ')} set out on "${q.name}" for ${fee} gold.`);
+      const names = a.members.map((pid) => s.people.find((p) => p.id === pid)!.name).join(', ');
+      log(s, 'info', `${names} set out ${a.kind === 'hunt' ? 'to hunt' : a.kind === 'flint' ? 'for flint' : 'to trade'}.`);
+      checkDiscoveries(s);
       return true;
-    }
-
-    case 'dismissAdventurer': {
-      const a = s.adventurers.find((x) => x.id === action.adventurerId);
-      if (!a || a.status !== 'idle') return false;
-      s.adventurers = s.adventurers.filter((x) => x !== a);
-      log(s, 'info', `${a.name} was sent on their way.`);
-      return true;
-    }
-  }
-}
-
-function cleanInventory(inv: Inventory): Inventory {
-  const out: Inventory = {};
-  for (const [item, n] of Object.entries(inv) as [ItemId, number][]) {
-    const v = Math.floor(n);
-    if (v > 0 && item in ITEMS) out[item] = v;
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------- time
-
-function tick(s: GameState, rng: Rng) {
-  s.tick += 1;
-
-  // Production and consumption, spread evenly over the day.
-  for (const [item, n] of Object.entries(productionPerDay(s)) as [ItemId, number][]) {
-    addItem(s, item, n / TICKS_PER_DAY);
-  }
-  const eaten = foodUsePerDay(s) / TICKS_PER_DAY;
-  if (qty(s, 'food') < eaten) {
-    s.inventory.food = 0;
-    s.starving = true;
-  } else {
-    s.inventory.food = qty(s, 'food') - eaten;
-  }
-  const burned = firewoodPerDay(s) / TICKS_PER_DAY;
-  if (burned > 0) {
-    if (qty(s, 'wood') < burned) {
-      s.inventory.wood = 0;
-      s.freezing = true;
-    } else {
-      s.inventory.wood = qty(s, 'wood') - burned;
-    }
-  }
-  s.gold = Math.max(0, s.gold + (taxesPerDay(s) - upkeepPerDay(s)) / TICKS_PER_DAY);
-
-  // Construction.
-  const c = s.construction;
-  if (c && s.tick >= c.endsTick) {
-    s.buildings[c.building] = c.targetLevel;
-    if (c.at) {
-      if (c.building === 'house') s.houses.push(c.at);
-      else s.placements[c.building] = c.at;
-    }
-    s.construction = null;
-    const def = BUILDINGS[c.building];
-    log(s, 'good', c.targetLevel === 1 ? `The ${def.name} is complete!` : `${def.name} upgraded to level ${c.targetLevel}.`);
-  }
-
-  // Quests.
-  for (const q of s.quests.filter((x) => s.tick >= x.endsTick)) resolveQuest(s, q.id, rng);
-
-  if (s.tick % TICKS_PER_DAY === 0) newDay(s, rng);
-}
-
-function resolveQuest(s: GameState, questId: string, rng: Rng) {
-  const quest = s.quests.find((q) => q.id === questId)!;
-  s.quests = s.quests.filter((q) => q.id !== questId);
-  const t = questTemplate(quest.templateId)!;
-  const party = quest.partyIds.map((id) => s.adventurers.find((a) => a.id === id)).filter((a): a is Adventurer => !!a);
-  const success = rng.chance(quest.successChance);
-  const today = day(s);
-
-  const hasCleric = party.some((a) => a.cls === 'cleric');
-  const potions = quest.supplies.healing_potion ?? 0;
-  const armor = Math.min(quest.supplies.leather_armor ?? 0, party.length);
-
-  const lost: string[] = [];
-  const hurt: string[] = [];
-  party.forEach((a, i) => {
-    let injury = (success ? 0.08 : 0.45) - potions * 0.08;
-    if (a.cls === 'mage') injury *= 1.5;
-    if (hasCleric) injury /= 2;
-    injury = Math.max(0.02, injury);
-    let death = success ? 0 : 0.12;
-    if (i < armor) death /= 2;
-    if (hasCleric) death /= 2;
-
-    if (rng.chance(death)) {
-      lost.push(a.name);
-      s.adventurers = s.adventurers.filter((x) => x.id !== a.id);
-      return;
-    }
-    if (rng.chance(injury)) {
-      a.status = 'injured';
-      a.recoversOnDay = today + 2;
-      hurt.push(a.name);
-    } else {
-      a.status = 'idle';
-    }
-    a.leavesOnDay = Math.max(a.leavesOnDay, today + 3);
-    if (success) {
-      a.questsCompleted += 1;
-      a.xp += t.difficulty;
-      while (a.xp >= xpToNext(a)) {
-        a.xp -= xpToNext(a);
-        a.level += 1;
-        a.fee = Math.round(a.fee * 1.25 + 3);
-        log(s, 'good', `${a.name} reached level ${a.level}.`);
-      }
-    }
-  });
-
-  // Gear comes back on success; on failure each piece has an even chance of being lost.
-  for (const item of ['iron_sword', 'leather_armor'] as ItemId[]) {
-    const n = quest.supplies[item] ?? 0;
-    let back = 0;
-    for (let i = 0; i < n; i++) if (success || rng.chance(0.5)) back++;
-    if (back) addItem(s, item, back);
-  }
-
-  if (success) {
-    const rogue = party.some((a) => a.cls === 'rogue');
-    const parts: string[] = [];
-    for (const l of t.loot) {
-      let n = rng.int(l.min, l.max);
-      if (l.item === 'gold') {
-        if (rogue) n = Math.round(n * 1.25);
-        s.gold += n;
-        parts.push(`${n} gold`);
-      } else {
-        const got = addItem(s, l.item, n);
-        parts.push(`${Math.round(got)} ${ITEMS[l.item].name}${got < n ? ' (storage full)' : ''}`);
-      }
-    }
-    s.reputation += t.reputation;
-    log(s, 'quest', `"${t.name}" succeeded! Brought back ${parts.join(', ')}. Reputation +${t.reputation}.`);
-  } else {
-    log(s, 'bad', `"${t.name}" failed. The party returned empty-handed.`);
-  }
-  if (hurt.length) log(s, 'bad', `${hurt.join(', ')} ${hurt.length > 1 ? 'were' : 'was'} injured and must rest.`);
-  if (lost.length) log(s, 'bad', `${lost.join(', ')} did not return. They will be remembered.`);
-}
-
-function newDay(s: GameState, rng: Rng) {
-  const today = day(s);
-
-  // Seasons.
-  if ((today - 1) % DAYS_PER_SEASON === 0) {
-    const se = season(s);
-    log(s, se.id === 'winter' ? 'bad' : 'info', `${se.icon} ${se.name} has come. ${se.description}`);
-  }
-
-  // Population.
-  if (s.starving || s.freezing) {
-    if (s.population > 1) {
-      s.population -= 1;
-      log(s, 'bad', s.starving
-        ? 'Food ran out. A family has left the village in search of a better life.'
-        : 'The woodpiles ran dry and the cold set in. A family has left for warmer lands.');
-    }
-  } else if (s.population < housingCap(s) && qty(s, 'food') > s.population) {
-    s.population += 1;
-    log(s, 'good', 'A new family has settled in the village.');
-  }
-  s.starving = false;
-  s.freezing = false;
-
-  // Adventurers: recovery, departures, arrivals.
-  for (const a of s.adventurers) {
-    if (a.status === 'injured' && a.recoversOnDay !== undefined && today >= a.recoversOnDay) {
-      a.status = 'idle';
-      a.recoversOnDay = undefined;
-      a.leavesOnDay = Math.max(a.leavesOnDay, today + 2);
-      log(s, 'info', `${a.name} has recovered.`);
-    }
-  }
-  const leaving = s.adventurers.filter((a) => a.status === 'idle' && today >= a.leavesOnDay);
-  for (const a of leaving) log(s, 'info', `${a.name} grew restless and left the village.`);
-  s.adventurers = s.adventurers.filter((a) => !leaving.includes(a));
-
-  const tavern = s.buildings.tavern;
-  if (tavern > 0 && s.adventurers.length < 1 + tavern * 2 && rng.chance(0.35 + tavern * 0.15)) {
-    const a = spawnAdventurer(s, rng);
-    s.adventurers.push(a);
-    log(s, 'info', `${a.name}, a level ${a.level} ${CLASSES[a.cls].name}, arrived at the tavern.`);
-  }
-
-  // Random events.
-  if (rng.chance(0.12)) {
-    const roll = rng.int(0, 3);
-    if (roll === 0 && s.buildings.farm > 0) {
-      const n = addItem(s, 'food', 8 * s.buildings.farm);
-      log(s, 'good', `A bountiful harvest! +${Math.round(n)} food.`);
-    } else if (roll === 1) {
-      s.reputation += 1;
-      log(s, 'good', 'A travelling bard sings of your village in distant towns. Reputation +1.');
-    } else if (roll === 2 && qty(s, 'wood') > 20) {
-      const n = Math.floor(qty(s, 'wood') * 0.1);
-      addItem(s, 'wood', -n);
-      log(s, 'bad', `A storm rotted part of the woodpile. -${n} wood.`);
-    } else if (roll === 3 && s.gold > 60) {
-      const n = Math.floor(s.gold * 0.08);
-      s.gold -= n;
-      log(s, 'bad', `Thieves slipped into the treasury at night. -${n} gold.`);
     }
   }
 }
@@ -402,11 +171,17 @@ export function saveGame(s: GameState) {
 export function loadGame(): GameState | null {
   try {
     const raw = localStorage.getItem(SAVE_KEY);
-    if (!raw) return null;
-    return migrate(JSON.parse(raw));
+    return raw ? migrate(JSON.parse(raw)) : null;
   } catch {
     return null;
   }
+}
+
+/** Saves from before era 1 (versions 1–2) belong to a different game and are not carried over. */
+export function migrate(raw: unknown): GameState | null {
+  const s = raw as GameState;
+  if (!s || typeof s !== 'object' || s.version !== SAVE_VERSION) return null;
+  return s;
 }
 
 export function clearSave() {
@@ -415,29 +190,4 @@ export function clearSave() {
   } catch {
     /* ignore */
   }
-}
-
-/** Upgrade an older save to the current format. Returns null if it cannot be read. */
-export function migrate(raw: unknown): GameState | null {
-  const s = raw as GameState & { version: number };
-  if (!s || typeof s !== 'object' || typeof s.version !== 'number') return null;
-  if (s.version === 1) {
-    // v1 had a fixed layout: give every existing building its old spot.
-    s.placements = {};
-    for (const [id, at] of Object.entries(DEFAULT_SPOTS) as [keyof typeof DEFAULT_SPOTS, (typeof DEFAULT_SPOTS)['farm']][]) {
-      if (s.buildings[id] > 0) s.placements[id] = at;
-    }
-    s.houses = DEFAULT_HOUSE_SPOTS.slice(0, s.buildings.house);
-    s.freezing = false;
-    const c = s.construction;
-    if (c && needsPlacement(s, c.building)) {
-      c.at = c.building === 'house' ? DEFAULT_HOUSE_SPOTS[s.buildings.house] : DEFAULT_SPOTS[c.building];
-      if (!c.at || placementBlocker({ ...s, construction: null }, c.building, c.at)) {
-        c.at = findFreeSpot({ ...s, construction: null }, c.building) ?? undefined;
-      }
-      if (!c.at) s.construction = null;
-    }
-    s.version = 2;
-  }
-  return s.version === SAVE_VERSION ? s : null;
 }

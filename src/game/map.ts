@@ -1,62 +1,54 @@
-// The village grid: size, roads, building footprints and the starting layout.
-import type { BuildingId } from './types';
+// The village grid: a river valley with forest to the west and north, and the river along the east.
+import { STRUCTURES } from './data';
+import type { StructureType, Tile } from './types';
 
-export const GRID = 16;
-export const ROAD_X = 8; // north-south road column
-export const ROAD_Y = 8; // east-west road row
-
-export interface Tile {
-  x: number;
-  y: number;
-}
+export const GRID = 18;
 
 export interface Plot extends Tile {
   w: number;
   d: number;
 }
 
-export const FOOTPRINTS: Record<BuildingId, { w: number; d: number }> = {
-  town_hall: { w: 2, d: 2 },
-  house: { w: 1, d: 1 },
-  farm: { w: 4, d: 4 },
-  lumber_camp: { w: 3, d: 3 },
-  quarry: { w: 3, d: 3 },
-  mine: { w: 2, d: 2 },
-  herb_garden: { w: 2, d: 2 },
-  warehouse: { w: 2, d: 2 },
-  workshop: { w: 2, d: 2 },
-  smithy: { w: 2, d: 2 },
-  apothecary: { w: 2, d: 2 },
-  tavern: { w: 2, d: 2 },
-  market: { w: 2, d: 2 },
-};
+/** Deterministic noise in [0, 1) for a tile. */
+export function noise(x: number, y: number, salt = 0): number {
+  let h = (x * 374761393 + y * 668265263 + salt * 2147483647) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
 
-/** Suggested spots, used for the starting village and for migrating old saves. */
-export const DEFAULT_SPOTS: Record<Exclude<BuildingId, 'house'>, Tile> = {
-  town_hall: { x: 6, y: 6 },
-  tavern: { x: 9, y: 6 },
-  market: { x: 9, y: 9 },
-  warehouse: { x: 6, y: 9 },
-  workshop: { x: 5, y: 2 },
-  apothecary: { x: 2, y: 5 },
-  smithy: { x: 9, y: 2 },
-  lumber_camp: { x: 1, y: 1 },
-  quarry: { x: 12, y: 1 },
-  mine: { x: 13, y: 5 },
-  farm: { x: 1, y: 10 },
-  herb_garden: { x: 5, y: 13 },
-};
+/** West edge of the river at row y. The river is two tiles wide and meanders gently. */
+export const riverX = (y: number) => 14 + Math.round(Math.sin(y / 2.6) * 1.2);
 
-export const DEFAULT_HOUSE_SPOTS: Tile[] = [
-  [12, 10], [14, 10], [10, 12], [12, 12], [14, 12], [10, 14], [12, 14], [14, 14], [7, 12], [2, 15],
-].map(([x, y]) => ({ x, y }));
+export const isRiver = (x: number, y: number) => x === riverX(y) || x === riverX(y) + 1;
+export const isBank = (x: number, y: number) => !isRiver(x, y) && (isRiver(x + 1, y) || isRiver(x - 1, y));
 
-export const isRoad = (x: number, y: number) => x === ROAD_X || y === ROAD_Y;
+/** How wooded a tile is, 0..1: dense forest west and north, open land near the river and the village. */
+export function woodland(x: number, y: number): number {
+  if (isRiver(x, y)) return 0;
+  const west = Math.max(0, (6 - x) / 6);
+  const north = Math.max(0, (4 - y) / 4);
+  return Math.min(1, Math.max(west, north) + (noise(x, y, 7) - 0.5) * 0.3);
+}
 
-export const plotAt = (id: BuildingId, at: Tile): Plot => ({ ...at, ...FOOTPRINTS[id] });
+/** Tiles with standing trees at the start of the game. */
+export const hasTree = (x: number, y: number) => woodland(x, y) > 0.35 && noise(x, y, 1) < woodland(x, y);
+
+export const footprint = (type: StructureType) => ({ w: STRUCTURES[type].w, d: STRUCTURES[type].d });
+export const plotAt = (type: StructureType, at: Tile): Plot => ({ ...at, ...footprint(type) });
 
 export function plotTiles(p: Plot): Tile[] {
   const out: Tile[] = [];
   for (let x = p.x; x < p.x + p.w; x++) for (let y = p.y; y < p.y + p.d; y++) out.push({ x, y });
   return out;
 }
+
+export const tileKey = (t: Tile) => `${t.x},${t.y}`;
+
+/** The founders' village. */
+export const START_LAYOUT: { type: StructureType; at: Tile }[] = [
+  { type: 'hall', at: { x: 8, y: 7 } },
+  { type: 'longhouse', at: { x: 11, y: 7 } },
+  { type: 'field', at: { x: 6, y: 12 } },
+  { type: 'field', at: { x: 9, y: 12 } },
+  { type: 'pen', at: { x: 11, y: 3 } },
+];

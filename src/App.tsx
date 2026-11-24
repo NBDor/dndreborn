@@ -1,28 +1,30 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
-import { clearSave, createInitialState, loadGame, reduce, saveGame } from './game/engine';
 import { DAYS_PER_SEASON } from './game/data';
-import { day, dayOfSeason, hourOfDay, season, year } from './game/rules';
+import { clearSave, createInitialState, loadGame, reduce, saveGame } from './game/engine';
+import { dayOfSeason, season, year } from './game/rules';
 import type { Action, GameState } from './game/types';
-import { BuildingsPanel } from './ui/BuildingsPanel';
-import { CraftingPanel } from './ui/CraftingPanel';
+import { JourneysPanel } from './ui/JourneysPanel';
+import { KnowledgePanel } from './ui/KnowledgePanel';
 import { LogPanel } from './ui/LogPanel';
-import { MarketPanel } from './ui/MarketPanel';
+import { PeoplePanel } from './ui/PeoplePanel';
 import { ResourceBar } from './ui/ResourceBar';
-import { TavernPanel } from './ui/TavernPanel';
+import { StoresPanel } from './ui/StoresPanel';
+import { VillagePanel } from './ui/VillagePanel';
 
 type Root = { type: 'reset'; state: GameState } | Action;
 const rootReducer = (s: GameState, a: Root) => (a.type === 'reset' ? a.state : reduce(s, a));
 
 const TABS = [
   { id: 'village', label: '🏘️ Village' },
-  { id: 'crafting', label: '⚒️ Crafting' },
-  { id: 'tavern', label: '🍺 Tavern & Quests' },
-  { id: 'market', label: '⚖️ Market' },
+  { id: 'people', label: '👪 People' },
+  { id: 'stores', label: '🏺 Stores & crafts' },
+  { id: 'journeys', label: '🧭 Journeys' },
+  { id: 'knowledge', label: '💡 Knowledge' },
 ] as const;
 type Tab = (typeof TABS)[number]['id'];
 
-const SPEEDS = [0, 1, 2, 4];
-const MS_PER_TICK = 500; // one in-game hour per half second at 1×
+const SPEEDS = [0, 1, 2, 5];
+const MS_PER_DAY = 1000; // one day per second at 1×
 
 export default function App() {
   const [state, dispatch] = useReducer(rootReducer, undefined, () => loadGame() ?? createInitialState());
@@ -31,11 +33,11 @@ export default function App() {
 
   useEffect(() => {
     if (!speed) return;
-    const id = setInterval(() => dispatch({ type: 'tick' }), MS_PER_TICK / speed);
+    const id = setInterval(() => dispatch({ type: 'tick' }), MS_PER_DAY / speed);
     return () => clearInterval(id);
   }, [speed]);
 
-  // Autosave at most every few seconds, and when the tab is hidden.
+  // Autosave every few seconds and when the page is hidden.
   const latest = useRef(state);
   latest.current = state;
   useEffect(() => {
@@ -54,19 +56,17 @@ export default function App() {
     dispatch({ type: 'reset', state: createInitialState() });
   };
 
+  const se = season(state);
   return (
     <div className="app">
       <header className="topbar">
-        <h1>🏰 Hearthstead</h1>
-        <div className="clock">
-          Day <b>{day(state)}</b> · {String(hourOfDay(state)).padStart(2, '0')}:00
-        </div>
-        <div className={`season season-${season(state).id}`} title={season(state).description}>
-          {season(state).icon} {season(state).name} {dayOfSeason(state)}/{DAYS_PER_SEASON} · Year {year(state)}
+        <h1>🔥 Hearthstead</h1>
+        <div className={`season season-${se.id}`} title={se.description}>
+          {se.icon} {se.name}, day {dayOfSeason(state)} of {DAYS_PER_SEASON} · Year {year(state)}
         </div>
         <div className="speed">
           {SPEEDS.map((s) => (
-            <button key={s} className={speed === s ? 'active' : 'ghost'} onClick={() => setSpeed(s)}>
+            <button key={s} className={speed === s ? 'active' : 'ghost'} onClick={() => setSpeed(s)} title={s ? `${s} day${s > 1 ? 's' : ''} per second` : 'Pause'}>
               {s === 0 ? '⏸' : `${s}×`}
             </button>
           ))}
@@ -80,19 +80,17 @@ export default function App() {
         <main>
           <nav className="tabs">
             {TABS.map((t) => (
-              <button key={t.id} className={tab === t.id ? 'active' : 'ghost'} onClick={() => setTab(t.id)}>
-                {t.label}
-                {t.id === 'tavern' && state.adventurers.some((a) => a.status === 'idle') && <span className="dot" />}
-              </button>
+              <button key={t.id} className={tab === t.id ? 'active' : 'ghost'} onClick={() => setTab(t.id)}>{t.label}</button>
             ))}
           </nav>
           {/* The village stays mounted so the map keeps its camera and animations across tabs. */}
           <div hidden={tab !== 'village'}>
-            <BuildingsPanel state={state} dispatch={dispatch} />
+            <VillagePanel state={state} dispatch={dispatch} />
           </div>
-          {tab === 'crafting' && <CraftingPanel state={state} dispatch={dispatch} />}
-          {tab === 'tavern' && <TavernPanel state={state} dispatch={dispatch} />}
-          {tab === 'market' && <MarketPanel state={state} dispatch={dispatch} />}
+          {tab === 'people' && <PeoplePanel state={state} dispatch={dispatch} />}
+          {tab === 'stores' && <StoresPanel state={state} dispatch={dispatch} />}
+          {tab === 'journeys' && <JourneysPanel state={state} dispatch={dispatch} />}
+          {tab === 'knowledge' && <KnowledgePanel state={state} dispatch={dispatch} />}
         </main>
         <LogPanel state={state} />
       </div>

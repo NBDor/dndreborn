@@ -1,231 +1,251 @@
-// Derived values and validation rules, shared by the engine and the UI.
+// Derived values and validation, shared by the engine and the UI. Nothing here changes state.
 import {
-  BASE_HOUSING, BASE_STORAGE, BUILDINGS, BUILDING_ORDER, CLASSES, DAYS_PER_SEASON, FOOD_PER_VILLAGER,
-  HOUSING_PER_HOUSE, ITEMS, QUESTS, SEASONS, STORAGE_PER_WAREHOUSE, TAX_PER_VILLAGER, TICKS_PER_DAY,
-  TOWN_HALL_REPUTATION, UPKEEP_PER_LEVEL, type QuestTemplate, type RecipeDef, type SeasonDef,
+  CARRY_KG, CHILD_AGE, CLAY_PER_DAY, CLEAR_DAYS, CLEAR_WOOD, COOKING_WOOD, DAYS_PER_SEASON, DAYS_PER_YEAR, ELDER_AGE,
+  FOODS, GOAT_FODDER_KG, GOATS_PER_HERDER, GOATS_PER_PEN, GRANARY_KG, GROW_DAYS, HELPER_AGE, ITEMS, JOBS, KCAL_ADULT,
+  KCAL_CHILD, KCAL_ELDER, NEIGHBORS, PREY, RECIPES, SEASONS, SEED_KG, STRUCTURES, TECHS, type NeighborDef,
+  type SeasonDef,
 } from './data';
-import { GRID, isRoad, plotAt, plotTiles, type Plot } from './map';
-import type { Adventurer, BuildingId, GameState, Inventory, ItemId, Tile } from './types';
+import { GRID, hasTree, isRiver, plotAt, plotTiles, tileKey, type Plot } from './map';
+import type {
+  Amounts, ExpeditionKind, GameState, ItemId, JobId, Neighbor, Person, SkillId, Structure, StructureType, TechId, Tile,
+} from './types';
 
-export interface Cost {
-  gold: number;
-  items: Inventory;
-}
+// ---------------------------------------------------------------- calendar
 
-export const day = (s: GameState) => Math.floor(s.tick / TICKS_PER_DAY) + 1;
-export const hourOfDay = (s: GameState) => s.tick % TICKS_PER_DAY;
-
-// ---------------------------------------------------------------- seasons
-
-export const seasonIndex = (s: GameState) => Math.floor((day(s) - 1) / DAYS_PER_SEASON) % SEASONS.length;
+export const year = (s: GameState) => Math.floor(s.day / DAYS_PER_YEAR) + 1;
+export const dayOfYear = (s: GameState) => s.day % DAYS_PER_YEAR;
+export const seasonIndex = (s: GameState) => Math.floor(dayOfYear(s) / DAYS_PER_SEASON);
 export const season = (s: GameState): SeasonDef => SEASONS[seasonIndex(s)];
-/** 1-based day within the current season. */
-export const dayOfSeason = (s: GameState) => ((day(s) - 1) % DAYS_PER_SEASON) + 1;
-export const year = (s: GameState) => Math.floor((day(s) - 1) / (DAYS_PER_SEASON * SEASONS.length)) + 1;
-export const firewoodPerDay = (s: GameState) => s.population * season(s).firewood;
+export const dayOfSeason = (s: GameState) => (dayOfYear(s) % DAYS_PER_SEASON) + 1;
 
-export const qty = (s: GameState, item: ItemId) => s.inventory[item] ?? 0;
-export const storageCap = (s: GameState) => BASE_STORAGE + s.buildings.warehouse * STORAGE_PER_WAREHOUSE;
-export const housingCap = (s: GameState) => BASE_HOUSING + s.buildings.house * HOUSING_PER_HOUSE;
+// ---------------------------------------------------------------- stores
 
-export function jobsNeeded(s: GameState): number {
-  return BUILDING_ORDER.reduce((sum, id) => sum + BUILDINGS[id].workersPerLevel * s.buildings[id], 0);
+export const qty = (s: GameState, item: ItemId) => s.inventory[item]?.qty ?? 0;
+export const quality = (s: GameState, item: ItemId) => s.inventory[item]?.q ?? 0;
+
+export function storedKcal(s: GameState): number {
+  return FOODS.reduce((sum, id) => sum + qty(s, id) * (ITEMS[id].kcal ?? 0), 0);
 }
 
-/** Share of jobs that are staffed, 0..1. Production scales with it. */
-export function workforce(s: GameState): number {
-  const jobs = jobsNeeded(s);
-  return jobs === 0 ? 1 : Math.min(1, s.population / jobs);
+export function hasAmounts(s: GameState, need: Amounts, times = 1): boolean {
+  return (Object.entries(need) as [ItemId, number][]).every(([id, n]) => qty(s, id) >= n * times - 1e-9);
 }
 
-/** Gross production per day, before consumption. */
-export function productionPerDay(s: GameState): Inventory {
-  const out: Inventory = {};
-  const eff = workforce(s);
-  const mult = season(s).production;
-  for (const id of BUILDING_ORDER) {
-    const p = BUILDINGS[id].produces;
-    if (p && s.buildings[id] > 0) {
-      out[p.item] = (out[p.item] ?? 0) + p.perLevelPerDay * s.buildings[id] * eff * (mult[p.item] ?? 1);
+export function weightOf(a: Amounts): number {
+  return (Object.entries(a) as [ItemId, number][]).reduce((sum, [id, n]) => sum + n * ITEMS[id].weight, 0);
+}
+
+// ---------------------------------------------------------------- people
+
+export const age = (p: Person, day: number) => (day - p.born) / DAYS_PER_YEAR;
+export const isChild = (p: Person, day: number) => age(p, day) < CHILD_AGE;
+export const isHelper = (p: Person, day: number) => age(p, day) >= HELPER_AGE && age(p, day) < CHILD_AGE;
+export const isElder = (p: Person, day: number) => age(p, day) >= ELDER_AGE;
+export const canWorkAge = (p: Person, day: number) => age(p, day) >= HELPER_AGE;
+
+export function kcalNeed(p: Person, day: number): number {
+  if (isChild(p, day)) return KCAL_CHILD;
+  if (isElder(p, day)) return KCAL_ELDER;
+  return KCAL_ADULT;
+}
+
+export const isUnwell = (p: Person, day: number) => (p.unwellUntil ?? -1) > day;
+export const isAvailable = (p: Person, day: number) => !p.away && !isUnwell(p, day) && canWorkAge(p, day);
+
+export const skill = (p: Person, id: SkillId) => p.skills[id] ?? 0;
+
+/** How much a person gets done in a day at a job, before tools: skill, age and health all count. */
+export function workRate(p: Person, day: number, job: JobId): number {
+  const sk = JOBS[job].skill;
+  const s = sk ? skill(p, sk) : 30;
+  let rate = 0.4 + 0.6 * (s / 100);
+  if (isHelper(p, day)) rate *= 0.35;
+  else if (isElder(p, day)) rate *= 0.7;
+  if (p.health < 40) rate *= 0.5 + p.health / 80;
+  return rate;
+}
+
+export function bestAt(people: Person[], id: SkillId): number {
+  return people.reduce((m, p) => Math.max(m, skill(p, id)), 0);
+}
+
+export const workers = (s: GameState, job: JobId) => s.people.filter((p) => p.job === job && isAvailable(p, s.day));
+
+// ---------------------------------------------------------------- structures
+
+export const structuresOf = (s: GameState, type: StructureType, builtOnly = true) =>
+  s.structures.filter((x) => x.type === type && (!builtOnly || x.built));
+
+export const housing = (s: GameState) =>
+  s.structures.reduce((sum, x) => sum + (x.built ? (STRUCTURES[x.type].housing ?? 0) : 0), 0);
+export const granaryCapacity = (s: GameState) => structuresOf(s, 'granary').length * GRANARY_KG;
+export const penCapacity = (s: GameState) => structuresOf(s, 'pen').length * GOATS_PER_PEN;
+export const herdersNeeded = (s: GameState) => Math.ceil(s.goats / GOATS_PER_HERDER);
+
+export const plotOf = (x: Structure): Plot => plotAt(x.type, x.at);
+
+export function occupied(s: GameState, except?: string): Set<string> {
+  const set = new Set<string>();
+  for (const x of s.structures) if (x.id !== except) for (const t of plotTiles(plotOf(x))) set.add(tileKey(t));
+  return set;
+}
+
+export const treeStands = (s: GameState, x: number, y: number) => hasTree(x, y) && !s.cleared.includes(`${x},${y}`);
+
+/** Reason a structure cannot go at this spot, or null. */
+export function placementBlocker(s: GameState, type: StructureType, at: Tile): string | null {
+  const plot = plotAt(type, at);
+  if (plot.x < 0 || plot.y < 0 || plot.x + plot.w > GRID || plot.y + plot.d > GRID) return 'Off the map';
+  const taken = occupied(s);
+  for (const t of plotTiles(plot)) {
+    if (isRiver(t.x, t.y)) return 'In the river';
+    if (taken.has(tileKey(t))) return 'Space is taken';
+  }
+  return null;
+}
+
+/** Trees that must be felled to build here. */
+export function treesOn(s: GameState, type: StructureType, at: Tile): number {
+  return plotTiles(plotAt(type, at)).filter((t) => treeStands(s, t.x, t.y)).length;
+}
+
+export function buildPlan(s: GameState, type: StructureType, at: Tile) {
+  const def = STRUCTURES[type];
+  const trees = treesOn(s, type, at);
+  return {
+    trees,
+    days: def.days + def.clay / CLAY_PER_DAY + trees * CLEAR_DAYS,
+    wood: def.wood,
+    straw: def.straw,
+    clearedWood: trees * CLEAR_WOOD,
+  };
+}
+
+/** Reason the village cannot start this structure at all (ignoring where), or null. */
+export function buildBlocker(s: GameState, type: StructureType): string | null {
+  const def = STRUCTURES[type];
+  if (!def.buildable) return 'Cannot be built';
+  if (def.tech && !s.known.includes(def.tech)) return `Needs ${TECHS[def.tech].name}`;
+  const missing: string[] = [];
+  if (qty(s, 'wood') < def.wood) missing.push(`${Math.ceil(def.wood - qty(s, 'wood'))} kg wood`);
+  if (qty(s, 'straw') < def.straw) missing.push(`${Math.ceil(def.straw - qty(s, 'straw'))} kg straw`);
+  return missing.length ? `Missing ${missing.join(', ')}` : null;
+}
+
+// ---------------------------------------------------------------- knowledge
+
+export type TechStatus = 'known' | 'available' | 'locked' | 'future';
+
+export function techStatus(s: GameState, id: TechId): TechStatus {
+  const t = TECHS[id];
+  if (s.known.includes(id)) return 'known';
+  if (t.future) return 'future';
+  if (!t.prereqs.every((p) => s.known.includes(p))) return 'locked';
+  if (t.needs && structuresOf(s, t.needs).length === 0) return 'locked';
+  return 'available';
+}
+
+export const recipesFor = (s: GameState, job: JobId) =>
+  RECIPES.filter((r) => r.job === job && (!r.tech || s.known.includes(r.tech)));
+
+// ---------------------------------------------------------------- expeditions and trade
+
+export const neighborDef = (id: string): NeighborDef => NEIGHBORS.find((n) => n.id === id)!;
+export const prey = (id: string) => PREY.find((p) => p.id === id)!;
+
+/** What a neighbour will give or take for one unit, in labour-days: scarce things are worth more to them. */
+export function neighborValue(n: Neighbor, item: ItemId): number {
+  const def = neighborDef(n.id);
+  const base = ITEMS[item].value;
+  if (def.lacks.includes(item)) return base * 2;
+  if (def.makes[item]) return base * 0.8;
+  return base;
+}
+
+export function expeditionDays(kind: ExpeditionKind, target: string): number {
+  if (kind === 'hunt') return prey(target).days;
+  const d = neighborDef(target).days;
+  return kind === 'flint' ? d * 2 + 1 : d * 2;
+}
+
+export function expeditionBlocker(s: GameState, kind: ExpeditionKind, target: string, members: string[], cargo: Amounts = {}): string | null {
+  if (members.length === 0) return 'Choose who goes';
+  const people = members.map((id) => s.people.find((p) => p.id === id));
+  if (people.some((p) => !p || !isAvailable(p, s.day) || isHelper(p, s.day))) return 'Someone is unavailable';
+  if (kind === 'hunt') {
+    const def = prey(target);
+    if (members.length < def.minHunters) return `Needs at least ${def.minHunters} hunters`;
+    if (qty(s, 'arrows') < members.length) return `Each hunter needs a bundle of arrows (${Math.floor(qty(s, 'arrows'))} left)`;
+  }
+  if (kind === 'trade') {
+    if (!hasAmounts(s, cargo)) return 'Not enough goods in store';
+    const w = weightOf(cargo);
+    if (w > members.length * CARRY_KG) return `Too heavy: ${Math.ceil(w)} kg for ${members.length} carrying ${CARRY_KG} kg each`;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- summaries for the UI
+
+export type FieldStage = 'unsown' | 'sowing' | 'growing' | 'ripe';
+
+export function fieldStage(f: NonNullable<Structure['field']>, day: number): FieldStage {
+  if (f.sownOn === null) return f.sowWork > 0 ? 'sowing' : 'unsown';
+  return day - f.sownOn >= GROW_DAYS ? 'ripe' : 'growing';
+}
+
+export const dailyKcal = (s: GameState) =>
+  s.people.filter((p) => !p.away).reduce((sum, p) => sum + kcalNeed(p, s.day), 0);
+
+/** Days the food in store would last with nothing new coming in. */
+export const foodDays = (s: GameState) => storedKcal(s) / Math.max(1, dailyKcal(s));
+
+/** Firewood a whole winter needs, kg. */
+export function winterWood(s: GameState): number {
+  const houses = Math.min(Math.ceil(s.people.length / 8), s.structures.filter((x) => x.built && STRUCTURES[x.type].housing).length);
+  return (s.people.length * COOKING_WOOD + houses * SEASONS[3].heating) * DAYS_PER_SEASON;
+}
+
+export interface Warning {
+  level: 'bad' | 'warn';
+  text: string;
+}
+
+/** The headman's worries: what will go wrong soon if nothing changes. */
+export function warnings(s: GameState): Warning[] {
+  const out: Warning[] = [];
+  const se = season(s).id;
+  const fields = structuresOf(s, 'field').map((f) => fieldStage(f.field!, s.day));
+  const farmers = workers(s, 'farmer').length;
+  const days = foodDays(s);
+
+  if (days < 20) out.push({ level: 'bad', text: `Food for only ${Math.floor(days)} days. Gather, hunt, fish or slaughter goats.` });
+  else if (days < 45 && se !== 'autumn') out.push({ level: 'warn', text: `Food stores will last about ${Math.floor(days)} days.` });
+  if (s.report.hungry) out.push({ level: 'bad', text: 'People are going hungry.' });
+  if (se === 'spring' && fields.includes('unsown') && farmers === 0) out.push({ level: 'bad', text: 'Fields lie unsown and nobody is farming. Sowing must finish this spring.' });
+  if (se === 'spring' && fields.includes('unsown') && qty(s, 'grain') < SEED_KG) out.push({ level: 'bad', text: 'Not enough seed grain to sow.' });
+  if (fields.includes('ripe') && farmers === 0) out.push({ level: 'bad', text: 'Grain is ripe and nobody is harvesting: it is shattering in the field.' });
+  if ((se === 'autumn' || se === 'winter') && qty(s, 'wood') < winterWood(s) * (se === 'winter' ? 0.3 : 1)) {
+    out.push({ level: se === 'winter' ? 'bad' : 'warn', text: `Firewood is short for winter (about ${Math.round(winterWood(s) / 1000)} t needed). Put people on woodcutting.` });
+  }
+  const garments = Math.floor(qty(s, 'clothing'));
+  if ((se === 'autumn' || se === 'winter') && garments < s.people.length) out.push({ level: se === 'winter' ? 'bad' : 'warn', text: `Only ${garments} warm garments for ${s.people.length} people.` });
+  if (s.people.length > housing(s)) out.push({ level: se === 'winter' ? 'bad' : 'warn', text: `${s.people.length - housing(s)} people have no roof. Build a longhouse.` });
+  if (s.goats > 0 && workers(s, 'herder').length === 0) out.push({ level: 'warn', text: 'No one is herding: wolves will take the goats.' });
+  if (s.goats > penCapacity(s)) out.push({ level: 'warn', text: 'The goat pen is overcrowded.' });
+  if (se === 'autumn' && qty(s, 'fodder') < s.goats * GOAT_FODDER_KG * DAYS_PER_SEASON) out.push({ level: 'warn', text: 'Not enough fodder for the herd this winter: cut more or slaughter some goats.' });
+  for (const tool of ['axe', 'sickle'] as ItemId[]) if (qty(s, tool) < 1) out.push({ level: 'warn', text: `No ${ITEMS[tool].name.toLowerCase()}s left. The knapper needs flint.` });
+  for (const r of RECIPES) {
+    const target = s.targets[r.id] ?? 0;
+    if ((r.tech && !s.known.includes(r.tech)) || qty(s, r.id) >= target / 2) continue;
+    if (workers(s, r.job).length === 0) out.push({ level: 'warn', text: `${ITEMS[r.id].name} running low and no one works as a ${JOBS[r.job].name.toLowerCase()}.` });
+  }
+  // Knowledge held by a single ageing person.
+  for (const sk of ['knapping', 'herding', 'farming', 'hideworking'] as SkillId[]) {
+    const experts = s.people.filter((p) => skill(p, sk) >= 50);
+    if (experts.length === 1 && age(experts[0], s.day) >= 50) {
+      out.push({ level: 'warn', text: `Only ${experts[0].name} (${Math.floor(age(experts[0], s.day))}) really knows ${sk}. Have someone learn by working alongside them.` });
     }
   }
   return out;
 }
-
-export const foodUsePerDay = (s: GameState) => s.population * FOOD_PER_VILLAGER;
-export const taxesPerDay = (s: GameState) => s.population * TAX_PER_VILLAGER;
-export function upkeepPerDay(s: GameState): number {
-  const levels = BUILDING_ORDER.reduce((sum, id) => sum + (id === 'house' ? 0 : s.buildings[id]), 0);
-  return levels * UPKEEP_PER_LEVEL;
-}
-
-// ---------------------------------------------------------------- buildings
-
-export function maxLevelFor(s: GameState, id: BuildingId): number {
-  if (id === 'town_hall') return BUILDINGS.town_hall.maxLevel;
-  return Math.min(BUILDINGS[id].maxLevel, s.buildings.town_hall * 2 + 1);
-}
-
-export function buildCost(id: BuildingId, targetLevel: number): Cost {
-  const def = BUILDINGS[id];
-  const scale = Math.pow(def.costGrowth, targetLevel - 1);
-  const items: Inventory = {};
-  for (const [item, n] of Object.entries(def.baseCost.items) as [ItemId, number][]) {
-    items[item] = Math.round(n * scale);
-  }
-  // Higher tiers need finer materials.
-  if (targetLevel >= 3) items.planks = (items.planks ?? 0) + (targetLevel - 2) * 5;
-  if (targetLevel >= 4) items.tools = (items.tools ?? 0) + (targetLevel - 3);
-  return { gold: Math.round(def.baseCost.gold * scale), items };
-}
-
-export function buildHours(id: BuildingId, targetLevel: number): number {
-  return Math.round(BUILDINGS[id].buildHours * (1 + (targetLevel - 1) * 0.5));
-}
-
-export function missingFor(s: GameState, cost: Cost): string[] {
-  const missing: string[] = [];
-  if (s.gold < cost.gold) missing.push(`${Math.ceil(cost.gold - s.gold)} gold`);
-  for (const [item, n] of Object.entries(cost.items) as [ItemId, number][]) {
-    const have = qty(s, item);
-    if (have < n) missing.push(`${Math.ceil(n - have)} ${ITEMS[item].name}`);
-  }
-  return missing;
-}
-
-/** Reason the building cannot be started now, or null if it can. */
-export function buildBlocker(s: GameState, id: BuildingId): string | null {
-  const target = s.buildings[id] + 1;
-  if (target > BUILDINGS[id].maxLevel) return 'Max level';
-  if (target > maxLevelFor(s, id)) return `Needs Town Hall ${Math.ceil((target - 1) / 2)}`;
-  if (id === 'town_hall') {
-    const rep = TOWN_HALL_REPUTATION[target] ?? 0;
-    if (s.reputation < rep) return `Needs ${rep} reputation`;
-  }
-  if (s.construction) return 'Builders are busy';
-  const missing = missingFor(s, buildCost(id, target));
-  return missing.length ? `Missing ${missing.join(', ')}` : null;
-}
-
-// ---------------------------------------------------------------- placement
-
-/** A new building, and every new cottage, must be given a spot on the map. */
-export const needsPlacement = (s: GameState, id: BuildingId) => id === 'house' || s.buildings[id] === 0;
-
-export interface PlacedPlot {
-  id: BuildingId;
-  plot: Plot;
-  /** Cottage index for houses. */
-  index?: number;
-  underConstruction?: boolean;
-}
-
-/** Every plot in use: built buildings, cottages, and the site under construction. */
-export function placedPlots(s: GameState): PlacedPlot[] {
-  const out: PlacedPlot[] = [];
-  for (const id of BUILDING_ORDER) {
-    const at = s.placements[id];
-    if (id !== 'house' && at && s.buildings[id] > 0) out.push({ id, plot: plotAt(id, at) });
-  }
-  s.houses.forEach((at, index) => out.push({ id: 'house', plot: plotAt('house', at), index }));
-  const c = s.construction;
-  if (c?.at) {
-    out.push({ id: c.building, plot: plotAt(c.building, c.at), underConstruction: true, index: c.building === 'house' ? s.houses.length : undefined });
-  }
-  return out;
-}
-
-export function occupiedTiles(s: GameState): Set<string> {
-  const set = new Set<string>();
-  for (const { plot } of placedPlots(s)) for (const t of plotTiles(plot)) set.add(`${t.x},${t.y}`);
-  return set;
-}
-
-/** Reason a building cannot go at this spot, or null if it fits. */
-export function placementBlocker(s: GameState, id: BuildingId, at: Tile): string | null {
-  const plot = plotAt(id, at);
-  if (plot.x < 0 || plot.y < 0 || plot.x + plot.w > GRID || plot.y + plot.d > GRID) return 'Off the map';
-  const taken = occupiedTiles(s);
-  for (const t of plotTiles(plot)) {
-    if (isRoad(t.x, t.y)) return 'Blocks the road';
-    if (taken.has(`${t.x},${t.y}`)) return 'Space is taken';
-  }
-  return null;
-}
-
-/** First spot where the building fits, scanning outwards from the village centre. */
-export function findFreeSpot(s: GameState, id: BuildingId): Tile | null {
-  const c = GRID / 2;
-  const spots: Tile[] = [];
-  for (let x = 0; x < GRID; x++) for (let y = 0; y < GRID; y++) spots.push({ x, y });
-  spots.sort((a, b) => Math.hypot(a.x - c, a.y - c) - Math.hypot(b.x - c, b.y - c));
-  return spots.find((t) => !placementBlocker(s, id, t)) ?? null;
-}
-
-// ---------------------------------------------------------------- crafting
-
-export function recipeBlocker(s: GameState, r: RecipeDef, times = 1): string | null {
-  if (s.buildings[r.station] < r.stationLevel) return `Needs ${BUILDINGS[r.station].name} ${r.stationLevel}`;
-  const inputs: Inventory = {};
-  for (const [item, n] of Object.entries(r.inputs) as [ItemId, number][]) inputs[item] = n * times;
-  const missing = missingFor(s, { gold: 0, items: inputs });
-  if (missing.length) return `Missing ${missing.join(', ')}`;
-  if (qty(s, r.output) + r.qty * times > storageCap(s)) return 'Storage full';
-  return null;
-}
-
-// ---------------------------------------------------------------- market
-
-export const buyPrice = (s: GameState, item: ItemId) =>
-  Math.ceil(ITEMS[item].value * (1.6 - 0.08 * s.buildings.market));
-export const sellPrice = (s: GameState, item: ItemId) =>
-  Math.max(1, Math.floor(ITEMS[item].value * (0.5 + 0.08 * s.buildings.market) * 10) / 10);
-
-// ---------------------------------------------------------------- quests
-
-export const questTemplate = (id: string) => QUESTS.find((q) => q.id === id);
-
-export const questUnlocked = (s: GameState, q: QuestTemplate) => s.reputation >= q.minReputation;
-
-export function questDays(q: QuestTemplate, party: Adventurer[]): number {
-  return Math.max(1, q.days - (party.some((a) => a.cls === 'ranger') ? 1 : 0));
-}
-
-export function adventurerPower(a: Adventurer): number {
-  return a.level * CLASSES[a.cls].powerPerLevel;
-}
-
-/** Party power including gear. Warriors get gear first and get double from it. */
-export function partyPower(party: Adventurer[], supplies: Inventory): number {
-  let power = party.reduce((sum, a) => sum + adventurerPower(a), 0);
-  const order = [...party].sort((a, b) => Number(b.cls === 'warrior') - Number(a.cls === 'warrior'));
-  const gear: [ItemId, number][] = [['iron_sword', 3], ['leather_armor', 2]];
-  for (const [item, bonus] of gear) {
-    const n = Math.min(supplies[item] ?? 0, party.length);
-    for (let i = 0; i < n; i++) power += bonus * (order[i].cls === 'warrior' ? 2 : 1);
-  }
-  return power;
-}
-
-export function successChance(q: QuestTemplate, party: Adventurer[], supplies: Inventory): number {
-  if (party.length === 0) return 0;
-  const ratio = partyPower(party, supplies) / q.difficulty;
-  const rations = Math.min(0.15, (supplies.rations ?? 0) * 0.03);
-  const potions = Math.min(0.2, (supplies.healing_potion ?? 0) * 0.04);
-  const chance = 0.5 + (ratio - 1) * 0.6 + rations + potions;
-  return Math.min(0.95, Math.max(0.05, chance));
-}
-
-export const partyFee = (party: Adventurer[]) => party.reduce((sum, a) => sum + a.fee, 0);
-
-export function questBlocker(s: GameState, q: QuestTemplate, party: Adventurer[], supplies: Inventory): string | null {
-  if (!questUnlocked(s, q)) return `Needs ${q.minReputation} reputation`;
-  if (party.length === 0) return 'Choose at least one adventurer';
-  if (party.length > q.maxParty) return `At most ${q.maxParty} adventurers`;
-  if (party.some((a) => a.status !== 'idle')) return 'Adventurer unavailable';
-  const fee = partyFee(party);
-  const missing = missingFor(s, { gold: fee, items: supplies });
-  return missing.length ? `Missing ${missing.join(', ')}` : null;
-}
-
-export const xpToNext = (a: Adventurer) => a.level * 10;

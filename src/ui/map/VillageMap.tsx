@@ -1,12 +1,12 @@
 import { useEffect, useRef } from 'react';
-import { BUILDINGS } from '../../game/data';
-import type { BuildingId, GameState, Tile } from '../../game/types';
+import { STRUCTURES } from '../../game/data';
+import type { GameState, StructureType, Tile } from '../../game/types';
 import { VillageScene, type SceneCallbacks } from './scene';
 
 interface Props extends SceneCallbacks {
   state: GameState;
-  selected: BuildingId | null;
-  placing: BuildingId | null;
+  selected: string | null;
+  placing: StructureType | null;
 }
 
 /** Hosts the PixiJS village scene and forwards state to it. */
@@ -46,7 +46,7 @@ export function VillageMap({ state, selected, placing, onSelect, onPlace, onCanc
       <div ref={host} className="map-canvas" />
       {placing && (
         <div className="placing">
-          📍 Choose a spot for the <b>{BUILDINGS[placing].name}</b>{placing === 'house' ? ' (new cottage)' : ''}
+          📍 Choose a spot for the <b>{STRUCTURES[placing].name.toLowerCase()}</b>
           <button className="ghost" onClick={onCancelPlace}>Cancel</button>
         </div>
       )}
@@ -56,7 +56,7 @@ export function VillageMap({ state, selected, placing, onSelect, onPlace, onCanc
         <button className="ghost" onClick={() => scene.current?.fit()} aria-label="Reset view">⟲</button>
       </div>
       <div className="map-hint">
-        {placing ? 'Click a free spot to build · right-click or Esc to cancel' : 'Drag to pan · scroll to zoom · click a building'}
+        {placing ? 'Click a free spot to build · right-click or Esc to cancel' : 'Drag to pan · scroll to zoom · click a building or field'}
       </div>
     </div>
   );

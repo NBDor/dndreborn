@@ -1,24 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { BUILDINGS } from './data';
-import { DEFAULT_HOUSE_SPOTS, DEFAULT_SPOTS, GRID, isRoad, plotAt, plotTiles } from './map';
-import type { BuildingId } from './types';
+import { GRID, START_LAYOUT, hasTree, isRiver, plotAt, plotTiles, riverX, tileKey } from './map';
 
-describe('default layout', () => {
-  it('has a spot per building and per possible cottage', () => {
-    expect(DEFAULT_HOUSE_SPOTS.length).toBe(BUILDINGS.house.maxLevel);
+describe('river valley map', () => {
+  it('has a two-tile river running the length of the valley', () => {
+    for (let y = 0; y < GRID; y++) {
+      expect(isRiver(riverX(y), y)).toBe(true);
+      expect(riverX(y) + 1).toBeLessThan(GRID);
+    }
   });
 
-  it('keeps default spots on the grid, off the roads and apart', () => {
-    const plots = [
-      ...Object.entries(DEFAULT_SPOTS).map(([id, at]) => plotAt(id as BuildingId, at)),
-      ...DEFAULT_HOUSE_SPOTS.map((at) => plotAt('house', at)),
-    ];
+  it('is wooded to the west and open by the river', () => {
+    const westTrees = Array.from({ length: GRID }, (_, y) => hasTree(0, y)).filter(Boolean).length;
+    expect(westTrees).toBeGreaterThan(GRID / 2);
+    for (let y = 0; y < GRID; y++) expect(hasTree(riverX(y), y)).toBe(false);
+  });
+
+  it('starts with a village on dry land and nothing overlapping', () => {
     const seen = new Set<string>();
-    for (const t of plots.flatMap(plotTiles)) {
+    for (const t of START_LAYOUT.flatMap(({ type, at }) => plotTiles(plotAt(type, at)))) {
       expect(t.x >= 0 && t.y >= 0 && t.x < GRID && t.y < GRID).toBe(true);
-      expect(isRoad(t.x, t.y)).toBe(false);
-      expect(seen.has(`${t.x},${t.y}`)).toBe(false);
-      seen.add(`${t.x},${t.y}`);
+      expect(isRiver(t.x, t.y)).toBe(false);
+      expect(seen.has(tileKey(t))).toBe(false);
+      seen.add(tileKey(t));
     }
   });
 });

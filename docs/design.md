@@ -1,6 +1,6 @@
 # Hearthstead: design foundation
 
-Draft 0.1. This document sets the rules the game is built on. Code, content and future ideas should follow it.
+Draft 0.2. Era 1 has a playable proof of concept. This document sets the rules the game is built on. Code, content and future ideas should follow it.
 When something here changes, change it here first.
 
 ## 1. Pillars
@@ -46,6 +46,13 @@ A temperate river valley:
 | Chalk hills (a day away) | High-quality flint | Belongs to neighbours; must be traded or mined |
 | Uplands (several days) | Green and blue stones (copper ores), seen but not yet understood | Far, steep, other peoples |
 | Coast (far) | Salt, shells, dried fish | Only reachable through traders |
+
+## 2a. Time
+
+One game tick is **one real day**, so food, harvests, travel and spoilage use real-world figures directly (calories
+per day, kilos per field, days of travel). A season is 91 days and a year 364. At 1× speed a day passes each
+second, so a year takes about six minutes. There is no day/night cycle on the map, because a whole day passes per
+tick.
 
 ## 3. Eras
 

@@ -1,181 +1,159 @@
 import { describe, expect, it } from 'vitest';
-import { DAYS_PER_SEASON, QUESTS, RECIPES, TICKS_PER_DAY } from './data';
+import { DAYS_PER_SEASON, DAYS_PER_YEAR, GROW_DAYS, HARVEST_DAYS, SEED_KG, SOW_DAYS } from './data';
 import { createInitialState, migrate, reduce } from './engine';
-import { DEFAULT_SPOTS } from './map';
 import {
-  buildBlocker, buildCost, firewoodPerDay, partyPower, placedPlots, placementBlocker, productionPerDay, qty, season,
-  successChance,
+  buildBlocker, expeditionBlocker, placementBlocker, qty, season, storedKcal, structuresOf, techStatus, treesOn,
 } from './rules';
-import type { Action, Adventurer, GameState } from './types';
+import { seedReserve } from './sim';
+import type { Action, GameState, JobId } from './types';
 
 const run = (s: GameState, ...actions: Action[]) => actions.reduce(reduce, s);
-const ticks = (s: GameState, n: number) => {
+const days = (s: GameState, n: number) => {
   for (let i = 0; i < n; i++) s = reduce(s, { type: 'tick' });
   return s;
 };
-
-const adventurer = (over: Partial<Adventurer> = {}): Adventurer => ({
-  id: 'a1', name: 'Test', cls: 'warrior', level: 1, xp: 0, fee: 5, leavesOnDay: 99, status: 'idle', questsCompleted: 0,
-  ...over,
-});
+const person = (s: GameState, name: string) => s.people.find((p) => p.name === name)!;
+const assignAll = (s: GameState, job: JobId, names: string[]) =>
+  run(s, ...names.map((n) => ({ type: 'assign', personId: person(s, n).id, job }) as Action));
 
 describe('engine', () => {
   it('is deterministic for a given seed', () => {
-    const a = ticks(createInitialState(42), TICKS_PER_DAY * 10);
-    const b = ticks(createInitialState(42), TICKS_PER_DAY * 10);
-    expect(a).toEqual(b);
+    expect(days(createInitialState(42), 200)).toEqual(days(createInitialState(42), 200));
   });
 
   it('does not mutate the previous state', () => {
     const s = createInitialState(1);
     const snapshot = structuredClone(s);
-    ticks(s, 30);
-    reduce(s, { type: 'build', building: 'house', at: { x: 3, y: 3 } });
+    days(s, 30);
+    reduce(s, { type: 'build', structure: 'field', at: { x: 6, y: 15 } });
     expect(s).toEqual(snapshot);
   });
 
-  it('produces and consumes resources over a day', () => {
-    const s = createInitialState(7);
-    const after = ticks(s, TICKS_PER_DAY);
-    // farm 1 (+4) minus 5 villagers (-5), roughly; a harvest event could add more
-    expect(qty(after, 'wood')).toBeGreaterThan(qty(s, 'wood'));
-    expect(after.gold).toBeGreaterThan(s.gold - 10);
+  it('starts in spring with settlers, two fields, a pen and seed grain', () => {
+    const s = createInitialState(1);
+    expect(season(s).id).toBe('spring');
+    expect(s.people).toHaveLength(16);
+    expect(structuresOf(s, 'field')).toHaveLength(2);
+    expect(qty(s, 'grain')).toBe(1400);
+    expect(s.known).not.toContain('pottery');
   });
 
-  it('builds a structure after its construction time', () => {
+  it('feeds people from stores and loses health when food runs out', () => {
+    let s = createInitialState(2);
+    const kcal = storedKcal(s);
+    s = days(s, 1);
+    expect(storedKcal(s)).toBeLessThan(kcal);
+    expect(s.report.kcalEaten).toBeCloseTo(s.report.kcalNeeded, 0);
+
+    let hungry = createInitialState(2);
+    hungry = { ...hungry, inventory: { wood: { qty: 500, q: 0.5 } }, goats: 0 };
+    hungry = assignAll(hungry, 'idle', hungry.people.map((p) => p.name).filter((n) => !['Mira', 'Joss', 'Neve', 'Kel'].includes(n)));
+    const before = hungry.people[2].health;
+    hungry = days(hungry, 5);
+    expect(hungry.report.hungry).toBeGreaterThan(0);
+    expect(hungry.people[2].health).toBeLessThan(before);
+  });
+
+  it('sows in spring, grows for four months and harvests grain and straw', () => {
     let s = createInitialState(3);
-    const cost = buildCost('quarry', 1);
-    expect(reduce(s, { type: 'build', building: 'quarry' })).toBe(s); // a new building needs a spot
-    s = run(s, { type: 'build', building: 'quarry', at: { x: 12, y: 1 } });
-    expect(s.construction?.building).toBe('quarry');
-    expect(s.gold).toBe(120 - cost.gold);
-    expect(buildBlocker(s, 'house')).toBe('Builders are busy');
-    s = ticks(s, s.construction!.endsTick);
-    expect(s.buildings.quarry).toBe(1);
-    expect(s.placements.quarry).toEqual({ x: 12, y: 1 });
-    expect(s.construction).toBeNull();
+    s = assignAll(s, 'farmer', ['Aru', 'Bena', 'Esk', 'Vann', 'Doran']);
+    const grain0 = qty(s, 'grain');
+    s = days(s, 10);
+    const fields = structuresOf(s, 'field');
+    expect(fields.every((f) => f.field!.sownOn !== null)).toBe(true);
+    expect(qty(s, 'grain')).toBeLessThan(grain0 - 2 * SEED_KG + 1); // seed came out of the store (plus eating)
+    const sown = Math.max(...fields.map((f) => f.field!.sownOn!));
+    s = days(s, sown + GROW_DAYS + HARVEST_DAYS * 2 - s.day);
+    expect(structuresOf(s, 'field').every((f) => f.field!.sownOn === null && f.field!.harvestedOn)).toBe(true);
+    expect(qty(s, 'straw')).toBeGreaterThan(400 + 600); // two harvests' worth of straw on top of the start
+    expect(SOW_DAYS).toBeGreaterThan(0);
   });
 
-  it('upgrades an existing building in place without a spot', () => {
-    let s = createInitialState(3);
-    s = run(s, { type: 'build', building: 'farm' });
-    expect(s.construction).toMatchObject({ building: 'farm', targetLevel: 2 });
-    expect(s.construction?.at).toBeUndefined();
+  it('keeps seed grain back from eating', () => {
+    const s = createInitialState(4);
+    expect(seedReserve(s)).toBe(2 * SEED_KG);
   });
 
-  it('validates building placement', () => {
-    const s = createInitialState(3);
-    expect(placementBlocker(s, 'quarry', { x: 14, y: 1 })).toBe('Off the map');
-    expect(placementBlocker(s, 'smithy', { x: 7, y: 2 })).toBe('Blocks the road');
-    expect(placementBlocker(s, 'smithy', { x: 5, y: 5 })).toBe('Space is taken'); // overlaps town hall
-    expect(placementBlocker(s, 'smithy', { x: 10, y: 1 })).toBeNull();
-    expect(reduce(s, { type: 'build', building: 'quarry', at: { x: 14, y: 1 } })).toBe(s);
+  it('places structures only on free land, and clearing trees costs work but yields wood', () => {
+    const s = createInitialState(5);
+    expect(placementBlocker(s, 'field', { x: 17, y: 0 })).toBe('Off the map');
+    expect(placementBlocker(s, 'granary', { x: 14, y: 8 })).toBe('In the river');
+    expect(placementBlocker(s, 'granary', { x: 8, y: 7 })).toBe('Space is taken');
+    expect(treesOn(s, 'field', { x: 0, y: 0 })).toBeGreaterThan(0);
+    expect(buildBlocker(s, 'kiln')).toBe('Needs Updraft kiln');
+    let b = run(s, { type: 'build', structure: 'field', at: { x: 0, y: 0 } });
+    const site = b.structures.at(-1)!;
+    expect(site.built).toBe(false);
+    expect(site.clearedWood).toBeGreaterThan(0);
+    b = assignAll(b, 'builder', ['Doran', 'Vann', 'Esk', 'Maro']);
+    b = days(b, Math.ceil(site.workNeeded / 2.5) + 2);
+    expect(b.structures.at(-1)!.built).toBe(true);
+    expect(b.cleared).toContain('0,0');
   });
 
-  it('adds a cottage at a chosen spot for each house level', () => {
-    let s = createInitialState(4);
-    s = { ...s, gold: 999, inventory: { ...s.inventory, wood: 999 } };
-    s = run(s, { type: 'build', building: 'house', at: { x: 3, y: 14 } });
-    expect(placedPlots(s).some((p) => p.underConstruction && p.plot.x === 3 && p.plot.y === 14)).toBe(true);
-    expect(placementBlocker(s, 'house', { x: 3, y: 14 })).toBe('Space is taken');
-    s = ticks(s, s.construction!.endsTick);
-    expect(s.buildings.house).toBe(2);
-    expect(s.houses).toHaveLength(2);
-    expect(s.houses[1]).toEqual({ x: 3, y: 14 });
+  it('crafts towards targets: the knapper turns flint into tools', () => {
+    let s = createInitialState(6);
+    s = run(s, { type: 'setTarget', item: 'arrows', qty: 20 });
+    const arrows = qty(s, 'arrows');
+    s = days(s, 5);
+    expect(qty(s, 'arrows')).toBeGreaterThan(arrows);
+    expect(qty(s, 'flint')).toBeLessThan(8);
   });
 
-  it('rejects invalid actions by returning the same state', () => {
-    const s = createInitialState(3);
-    expect(reduce(s, { type: 'craft', recipeId: 'planks' })).toBe(s); // no workshop
-    expect(reduce(s, { type: 'sell', item: 'wood', qty: 1 })).toBe(s); // no market
-    expect(reduce(s, { type: 'build', building: 'town_hall' })).toBe(s); // needs reputation
+  it('cannot make pots before pottery is discovered; experiments discover it', () => {
+    let s = createInitialState(7);
+    expect(techStatus(s, 'pottery')).toBe('available');
+    expect(reduce(s, { type: 'assign', personId: person(s, 'Doran').id, job: 'researcher', research: 'kiln' })).toBe(s);
+    s = run(s, { type: 'assign', personId: person(s, 'Doran').id, job: 'researcher', research: 'pottery' });
+    s = { ...s, inventory: { ...s.inventory, clay: { qty: 1000, q: 0.6 } } };
+    s = days(s, 80);
+    expect(s.known).toContain('pottery');
+    expect(person(s, 'Doran').job).toBe('idle');
   });
 
-  it('crafts items at a station', () => {
-    let s = createInitialState(3);
-    s = { ...s, buildings: { ...s.buildings, workshop: 1 } };
-    s = run(s, { type: 'craft', recipeId: 'planks', times: 5 });
-    expect(qty(s, 'planks')).toBe(5);
-    expect(qty(s, 'wood')).toBe(50);
-    const tools = RECIPES.find((r) => r.id === 'tools')!;
-    expect(reduce(s, { type: 'craft', recipeId: tools.id })).toBe(s);
+  it('sends hunters out and brings them back', () => {
+    let s = createInitialState(8);
+    const team = ['Maro', 'Esk'].map((n) => person(s, n).id);
+    expect(expeditionBlocker(s, 'hunt', 'aurochs', team)).toBe('Needs at least 4 hunters');
+    s = run(s, { type: 'expedition', kind: 'hunt', target: 'deer', members: team });
+    expect(person(s, 'Maro').away).toBeDefined();
+    expect(qty(s, 'arrows')).toBe(6);
+    s = days(s, 3);
+    expect(person(s, 'Maro').away).toBeUndefined();
+    expect(s.expeditions).toHaveLength(0);
   });
 
-  it('trades at the market', () => {
-    let s = createInitialState(3);
-    s = { ...s, buildings: { ...s.buildings, market: 1 } };
-    const gold = s.gold;
-    s = run(s, { type: 'sell', item: 'stone', qty: 10 });
-    expect(qty(s, 'stone')).toBe(20);
-    expect(s.gold).toBeGreaterThan(gold);
-  });
-
-  it('sends adventurers on quests and resolves them', () => {
-    let s = createInitialState(5);
-    s = { ...s, gold: 500, adventurers: [adventurer({ level: 5 })] };
-    s = run(s, { type: 'startQuest', templateId: 'cellar_rats', partyIds: ['a1'], supplies: {} });
-    expect(s.quests).toHaveLength(1);
-    expect(s.adventurers[0].status).toBe('questing');
-    expect(s.gold).toBe(495);
-    s = ticks(s, TICKS_PER_DAY);
-    expect(s.quests).toHaveLength(0);
-    // 95% chance; seed 5 is a success
-    expect(s.reputation).toBeGreaterThanOrEqual(1);
-    expect(s.adventurers[0]?.questsCompleted).toBe(1);
-  });
-
-  it('gives warriors double gear bonus and caps chance', () => {
-    const war = adventurer();
-    const mage = adventurer({ id: 'a2', cls: 'mage' });
-    expect(partyPower([war], { iron_sword: 1 })).toBe(4 + 6);
-    expect(partyPower([mage], { iron_sword: 1 })).toBe(5 + 3);
-    expect(partyPower([mage, war], { iron_sword: 1 })).toBe(5 + 4 + 6);
-    const dragon = QUESTS.find((q) => q.id === 'dragon_lair')!;
-    expect(successChance(dragon, [war], {})).toBe(0.05);
-    expect(successChance(QUESTS[0], [adventurer({ level: 10 })], {})).toBe(0.95);
-  });
-
-  it('loses villagers when food runs out', () => {
+  it('trades within carrying limits and learns from neighbours', () => {
     let s = createInitialState(9);
-    s = { ...s, inventory: { ...s.inventory, food: 0 }, buildings: { ...s.buildings, farm: 0 } };
-    s = ticks(s, TICKS_PER_DAY);
-    expect(s.population).toBe(4);
+    const team = ['Teska', 'Kessa'].map((n) => person(s, n).id);
+    expect(expeditionBlocker(s, 'trade', 'reed', team, { grain: 60 })).toContain('Too heavy');
+    s = run(s, { type: 'expedition', kind: 'trade', target: 'reed', members: team, cargo: { grain: 40, sickle: 2 }, wants: ['pot'] });
+    s = days(s, 4);
+    expect(qty(s, 'pot')).toBeGreaterThan(0);
+    expect(s.research.pottery).toBeGreaterThan(0); // they saw the Reed people firing pots
   });
 
-  it('cycles seasons that change farm output', () => {
-    const s = createInitialState(11);
-    s.buildings.farm = 2;
-    s.population = 20; // fully staffed
-    const at = (d: number) => ({ ...s, tick: (d - 1) * TICKS_PER_DAY });
-    expect(season(at(1)).id).toBe('spring');
-    expect(season(at(1 + DAYS_PER_SEASON)).id).toBe('summer');
-    expect(season(at(1 + DAYS_PER_SEASON * 3)).id).toBe('winter');
-    expect(season(at(1 + DAYS_PER_SEASON * 4)).id).toBe('spring');
-    expect(productionPerDay(at(1 + DAYS_PER_SEASON)).food).toBeCloseTo(8 * 1.25);
-    expect(productionPerDay(at(1 + DAYS_PER_SEASON * 3)).food).toBeCloseTo(8 * 0.35);
+  it('slaughters goats for meat and hides', () => {
+    const s = run(createInitialState(10), { type: 'slaughter', count: 2 });
+    expect(s.goats).toBe(12);
+    expect(qty(s, 'meat')).toBe(28);
+    expect(qty(s, 'raw_hide')).toBe(2);
   });
 
-  it('burns firewood in winter and loses villagers when it runs out', () => {
-    let s = createInitialState(12);
-    s = { ...s, tick: DAYS_PER_SEASON * 3 * TICKS_PER_DAY, inventory: { ...s.inventory, food: 500, wood: 0 } };
-    s = { ...s, buildings: { ...s.buildings, lumber_camp: 0 } };
-    expect(firewoodPerDay(s)).toBeCloseTo(5 * 0.4);
-    s = ticks(s, TICKS_PER_DAY);
-    expect(s.population).toBe(4);
+  it('spoils fresh food fast and stored grain slowly', () => {
+    let s = createInitialState(11);
+    s = run(s, { type: 'slaughter', count: 10 });
+    s = { ...s, day: DAYS_PER_SEASON + 5 }; // summer
+    const meat = qty(s, 'meat');
+    s = days(s, 1);
+    expect(s.report.spoiled.meat).toBeGreaterThan(meat * 0.05);
+    expect(s.report.spoiled.grain ?? 0).toBeLessThan(qty(s, 'grain') * 0.01);
   });
 
-  it('migrates version 1 saves to the fixed layout', () => {
-    const v1 = createInitialState(13) as unknown as Record<string, unknown>;
-    delete v1.placements;
-    delete v1.houses;
-    delete v1.freezing;
-    v1.version = 1;
-    (v1.buildings as Record<string, number>).house = 3;
-    v1.construction = { building: 'market', targetLevel: 1, endsTick: 50 };
-    const s = migrate(v1)!;
-    expect(s.version).toBe(2);
-    expect(s.placements.town_hall).toEqual(DEFAULT_SPOTS.town_hall);
-    expect(s.houses).toHaveLength(3);
-    expect(s.construction?.at).toEqual(DEFAULT_SPOTS.market);
+  it('only loads saves from this era', () => {
+    expect(migrate({ version: 2 })).toBeNull();
+    const s = createInitialState(1);
+    expect(migrate(JSON.parse(JSON.stringify(s)))).toEqual(s);
+    expect(DAYS_PER_YEAR).toBe(364);
   });
 });
